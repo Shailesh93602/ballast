@@ -1,0 +1,350 @@
+import { sortedMapEntries } from "../core/order.js";
+import { ReplayLog } from "./replayLog.js";
+import {
+  type AdmitOutcome,
+  type CompleteOutcome,
+  type ControlPlaneConfig,
+  type FencingToken,
+  type ReleaseOutcome,
+  type RunId,
+  type SlotId,
+  type TenantId,
+} from "./types.js";
+
+/**
+ * The control plane.
+ *
+ * Three operations — admit, release, complete — over per-tenant caps, a tumbling
+ * credit window, a finite pool, leases with fencing tokens, and a durable
+ * completion log.
+ *
+ * Every decision here traces to a numbered row in docs/SEMANTICS.md. Where the
+ * code looks arbitrary, the row says why; where the row was genuinely open, it
+ * is marked TBD there rather than silently resolved here. That is the whole
+ * point of the document existing before this file did.
+ */
+
+interface Slot {
+  readonly id: SlotId;
+  tenant: TenantId | null;
+  runId: RunId | null;
+  token: FencingToken;
+  leaseUntil: number;
+  released: boolean;
+}
+
+interface RunState {
+  readonly runId: RunId;
+  readonly tenant: TenantId;
+  slotId: SlotId | null;
+  status: "admitted" | "completed" | "cancelled";
+  /** Set once the effect has been applied — I8's identity. */
+  effectApplied: boolean;
+}
+
+export class ControlPlane {
+  private readonly config: ControlPlaneConfig;
+  private readonly slots: Slot[] = [];
+  private readonly runs = new Map<RunId, RunState>();
+  private readonly caps = new Map<TenantId, number>();
+  private readonly creditsPerWindow = new Map<TenantId, number>();
+  /** Credits spent in the CURRENT window, per tenant. */
+  private readonly creditsSpent = new Map<TenantId, number>();
+  private currentWindow = 0;
+  private nextToken: FencingToken = 1;
+
+  readonly log: ReplayLog;
+
+  // Monotonic counters — never decremented. I3 is built on these.
+  private claimsGranted = 0;
+  private releasesDone = 0;
+  private doubleReleases: string[] = [];
+  private staleReleases: string[] = [];
+  private effectCounts = new Map<string, number>();
+
+  constructor(config: ControlPlaneConfig) {
+    this.config = config;
+    for (const t of config.tenants) {
+      this.caps.set(t.id, t.cap);
+      this.creditsPerWindow.set(t.id, t.creditsPerWindow);
+      this.creditsSpent.set(t.id, 0);
+    }
+    for (let i = 0; i < config.poolCapacity; i++) {
+      this.slots.push({
+        id: `slot-${i}`,
+        tenant: null,
+        runId: null,
+        token: 0,
+        leaseUntil: 0,
+        released: false,
+      });
+    }
+    this.log = new ReplayLog(config.retentionCount, config.retentionTicks);
+  }
+
+  // ─── State exposed to the invariant checker ────────────────────────────────
+
+  inFlightByTenant(): ReadonlyMap<TenantId, number> {
+    const out = new Map<TenantId, number>();
+    for (const t of this.config.tenants) out.set(t.id, 0);
+    for (const s of this.slots) {
+      if (s.tenant !== null) out.set(s.tenant, (out.get(s.tenant) ?? 0) + 1);
+    }
+    return out;
+  }
+
+  get totalClaimed(): number {
+    return this.slots.filter((s) => s.tenant !== null).length;
+  }
+
+  get counters() {
+    return {
+      claimsGranted: this.claimsGranted,
+      releasesDone: this.releasesDone,
+      doubleReleases: [...this.doubleReleases],
+      staleReleases: [...this.staleReleases],
+    };
+  }
+
+  capsMap(): ReadonlyMap<TenantId, number> {
+    return this.caps;
+  }
+
+  creditsSpentMap(): ReadonlyMap<TenantId, number> {
+    return this.creditsSpent;
+  }
+
+  effectCountsMap(): ReadonlyMap<string, number> {
+    return this.effectCounts;
+  }
+
+  /**
+   * Roll the tumbling window if `now` has crossed into a new epoch.
+   *
+   * Tumbling, not sliding (SEMANTICS A1). The accepted cost — a 2x burst across
+   * a window boundary — is stated in that row rather than discovered later.
+   */
+  private rollWindowIfNeeded(now: number): void {
+    const window = Math.floor(now / this.config.windowTicks);
+    if (window === this.currentWindow) return;
+    this.currentWindow = window;
+    for (const t of this.config.tenants) this.creditsSpent.set(t.id, 0);
+  }
+
+  /**
+   * Reclaim expired leases lazily, on demand (SEMANTICS C5).
+   *
+   * No sweeper: a sweeper is a second concurrent actor whose scheduling becomes
+   * another ordering dimension the seed has to control, and keeping the system
+   * to one decision-maker is what makes the reference model in M4 tractable.
+   * The accepted cost is that a slot can sit expired-but-unreclaimed while
+   * nobody is asking for capacity, which is externally invisible.
+   */
+  private reclaimExpired(now: number): void {
+    for (const s of this.slots) {
+      if (s.tenant !== null && s.leaseUntil <= now) {
+        s.tenant = null;
+        s.runId = null;
+        s.released = false;
+        this.releasesDone++;
+      }
+    }
+  }
+
+  // ─── Operation 1: admit ────────────────────────────────────────────────────
+
+  /**
+   * Admit a run: check cap, check credit, take a slot — as ONE step.
+   *
+   * SEMANTICS B2 is the reason this reads the way it does. The cap predicate is
+   * evaluated at the moment the slot is taken, not before it. Splitting them is
+   * the classic race: two concurrent admits both observe `inFlight = cap - 1`,
+   * both conclude there is room, and both claim. Because this simulation is
+   * single-threaded the split would not fail *here* — which is exactly why the
+   * mutant that splits them is in the M5 corpus, and why the substrate injects
+   * duplicate and reordered requests to expose it.
+   */
+  admit(now: number, tenant: TenantId, runId: RunId): AdmitOutcome {
+    this.rollWindowIfNeeded(now);
+    this.reclaimExpired(now);
+
+    const cap = this.caps.get(tenant);
+    if (cap === undefined) return { ok: false, reason: "unknown-tenant" };
+
+    const existing = this.runs.get(runId);
+    if (existing?.status === "cancelled") {
+      // SEMANTICS D1 — the cancel wins a race with the admit.
+      return { ok: false, reason: "cancelled-before-start" };
+    }
+
+    // The atomic region begins here. Everything from this point to the slot
+    // assignment must be indivisible.
+    const inFlight = this.inFlightByTenant().get(tenant) ?? 0;
+    if (inFlight >= cap) return { ok: false, reason: "cap-exceeded" };
+
+    const spent = this.creditsSpent.get(tenant) ?? 0;
+    const budget = this.creditsPerWindow.get(tenant) ?? 0;
+    if (spent >= budget) return { ok: false, reason: "no-credit" };
+
+    const free = this.slots.find((s) => s.tenant === null);
+    if (free === undefined) return { ok: false, reason: "pool-full" };
+
+    free.tenant = tenant;
+    free.runId = runId;
+    free.token = this.nextToken++;
+    free.leaseUntil = now + this.config.leaseTicks;
+    free.released = false;
+    this.claimsGranted++;
+    // Credit is debited AT CLAIM (SEMANTICS A3) — the single most consequential
+    // row in the document. Debiting at admit bills for work that may never run;
+    // debiting at completion cannot bound concurrency at all.
+    this.creditsSpent.set(tenant, spent + 1);
+    this.runs.set(runId, {
+      runId,
+      tenant,
+      slotId: free.id,
+      status: "admitted",
+      effectApplied: false,
+    });
+    // The atomic region ends here.
+
+    return { ok: true, slotId: free.id, token: free.token, leaseUntil: free.leaseUntil };
+  }
+
+  // ─── Operation 2: release ──────────────────────────────────────────────────
+
+  /**
+   * Release a slot, validated by fencing token.
+   *
+   * A stale holder — one whose lease expired and whose slot was reclaimed and
+   * handed to someone else — must NOT be able to release. If it could, it would
+   * free a slot another run legitimately owns, and the damage would surface far
+   * away as an I1 or I2 violation with no obvious cause. Catching it here is
+   * what makes that failure attributable (SEMANTICS C1, C4).
+   */
+  release(now: number, slotId: SlotId, token: FencingToken): ReleaseOutcome {
+    const slot = this.slots.find((s) => s.id === slotId);
+    if (slot === undefined) return { ok: false, reason: "not-held" };
+
+    if (slot.released) {
+      this.doubleReleases.push(slotId);
+      return { ok: false, reason: "already-released" };
+    }
+    if (slot.tenant === null) return { ok: false, reason: "not-held" };
+    if (slot.token !== token) {
+      this.staleReleases.push(slotId);
+      return { ok: false, reason: "stale-token" };
+    }
+
+    // SEMANTICS D5 — the slot returns to the pool and to the tenant's cap in one
+    // step. Any window where one has happened and the other has not is a window
+    // where I1 and I2 disagree.
+    slot.tenant = null;
+    slot.runId = null;
+    slot.released = false;
+    this.releasesDone++;
+    void now;
+    return { ok: true };
+  }
+
+  // ─── Operation 3: complete ─────────────────────────────────────────────────
+
+  /**
+   * Record a completion. Idempotent per run.
+   *
+   * This is KhataGO's claim protocol, generalised: the effect is applied exactly
+   * once per identity no matter how many times delivery happens, because the
+   * transition to `completed` is a compare-and-set on the run's status rather
+   * than a read followed by a write.
+   *
+   * A duplicate is ACKED, not errored (SEMANTICS E7) — erroring would make the
+   * sender retry forever, and at-least-once delivery guarantees duplicates.
+   */
+  complete(now: number, runId: RunId, outcome: "completed" | "failed"): CompleteOutcome {
+    const run = this.runs.get(runId);
+    if (run === undefined) return { ok: false, reason: "unknown-run" };
+
+    if (run.status === "cancelled") {
+      // SEMANTICS E8 — recorded, but the effect is NOT applied.
+      const replayId = this.log.append({
+        vtime: now,
+        tenant: run.tenant,
+        runId,
+        outcome: "cancelled",
+      });
+      void replayId;
+      return { ok: false, reason: "completed-after-cancel" };
+    }
+
+    if (run.status === "completed") {
+      // Already done. Ack the duplicate so the sender stops retrying, and do
+      // NOT touch the effect count — that is I8's whole assertion.
+      const existing = this.log
+        .assignedIds()
+        .find((id) => id > 0 && this.findRunForId(id) === runId);
+      return { ok: true, replayId: existing ?? 0, duplicate: true };
+    }
+
+    // The CAS: only the transition out of `admitted` applies the effect.
+    run.status = "completed";
+    if (!run.effectApplied) {
+      run.effectApplied = true;
+      this.effectCounts.set(runId, (this.effectCounts.get(runId) ?? 0) + 1);
+    }
+    const replayId = this.log.append({
+      vtime: now,
+      tenant: run.tenant,
+      runId,
+      outcome,
+    });
+    this.log.evict(now);
+    return { ok: true, replayId, duplicate: false };
+  }
+
+  /** Cancel — idempotent (SEMANTICS D4), wins against admit, loses to completion. */
+  cancel(now: number, runId: RunId): "cancelled" | "already-complete" | "noop" {
+    const run = this.runs.get(runId);
+    if (run === undefined) {
+      // Cancel arriving before the admit: remember it so the admit loses (D1).
+      this.runs.set(runId, {
+        runId,
+        tenant: "",
+        slotId: null,
+        status: "cancelled",
+        effectApplied: false,
+      });
+      return "cancelled";
+    }
+    if (run.status === "completed") return "already-complete"; // D2
+    if (run.status === "cancelled") return "noop"; // D4
+    run.status = "cancelled";
+    if (run.slotId !== null) {
+      const slot = this.slots.find((s) => s.id === run.slotId);
+      if (slot !== undefined && slot.tenant !== null) {
+        slot.tenant = null;
+        slot.runId = null;
+        this.releasesDone++;
+      }
+    }
+    void now;
+    return "cancelled";
+  }
+
+  private findRunForId(_id: number): string | undefined {
+    return undefined;
+  }
+
+  /** Independent recomputation of credits, for I4's differential check. */
+  creditsExpected(): ReadonlyMap<TenantId, number> {
+    const out = new Map<TenantId, number>();
+    for (const t of this.config.tenants) out.set(t.id, 0);
+    for (const [, run] of sortedMapEntries(
+      new Map([...this.runs].map(([k, v]) => [k, v])),
+    )) {
+      if (run.tenant === "") continue;
+      if (run.status === "cancelled" && run.slotId === null) continue;
+      out.set(run.tenant, (out.get(run.tenant) ?? 0) + 1);
+    }
+    return out;
+  }
+}
