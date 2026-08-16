@@ -154,6 +154,19 @@ tenant's next request, which is precisely the noisy-neighbour behaviour the caps
 exist to prevent.
 **Guards** I2. **Status: `DECIDED`**
 
+### B6 · Does recording a completion release the run's slot?
+
+**→ Yes. Completion is terminal and frees capacity atomically with recording the
+effect.**
+**Else** a completed run keeps holding a slot until its lease expires, so the
+pool stays occupied by work that has already finished — capacity that is
+provably idle but unavailable. It also makes the observable meaning of
+"in-flight" drift from "actually running", which is what B1 was trying to pin
+down.
+**Guards** I1, I2, I3.
+**Status: `DECIDED`** — _added 2026-08-16 as an amendment. See the note below;
+this row exists because the differential oracle caught the gap._
+
 ### B5 · Are the two rejection reasons distinguishable to the caller?
 
 **→ Yes**, and they are distinct values in the decision log.

@@ -31,8 +31,7 @@ function stateOf(plane: ControlPlane, vtime: number): CheckableState {
     creditsSpent: plane.creditsSpentMap(),
     creditsExpected: plane.creditsSpentMap(),
     slotOwnerToken: new Map(),
-    doubleReleases: c.doubleReleases,
-    staleReleases: c.staleReleases,
+    acceptedReleases: c.acceptedReleases,
     replayIds: plane.log.assignedIds(),
     effectCounts: plane.effectCountsMap(),
     quiesced: false,
@@ -148,7 +147,10 @@ describe("leases and fencing (SEMANTICS C1, C2, C4)", () => {
     const stale = plane.release(afterExpiry, first.slotId, first.token);
     expect(stale.ok).toBe(false);
     if (!stale.ok) expect(stale.reason).toBe("stale-token");
-    expect(plane.counters.staleReleases.length).toBeGreaterThan(0);
+    expect(
+      plane.counters.staleReleaseAttempts,
+      "the attempt should be counted for observability, but refusing it is correct behaviour, not a violation",
+    ).toBeGreaterThan(0);
   });
 
   it("a valid release succeeds and returns the slot to the pool", () => {

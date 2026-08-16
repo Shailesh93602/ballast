@@ -16,6 +16,16 @@ import { sortedMapEntries } from "../core/order.js";
 
 export type InvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
 
+export interface AcceptedRelease {
+  readonly slotId: string;
+  /** The token the releasing party presented. */
+  readonly tokenUsed: number;
+  /** The token the slot actually held when the release was accepted. */
+  readonly tokenCurrent: number;
+  /** How many times this slot had already been released in this generation. */
+  readonly priorReleasesOfGeneration: number;
+}
+
 export interface Violation {
   readonly invariant: InvariantId;
   readonly vtime: number;
@@ -40,10 +50,17 @@ export interface CheckableState {
   readonly creditsExpected: ReadonlyMap<string, number>;
   /** slotId -> the fencing token of its current owner. */
   readonly slotOwnerToken: ReadonlyMap<string, number>;
-  /** Slots released more than once — should always be empty. */
-  readonly doubleReleases: readonly string[];
-  /** Slots released by a holder whose token was stale. */
-  readonly staleReleases: readonly string[];
+  /**
+   * Releases the control plane ACCEPTED, as raw facts: which slot, which token
+   * the caller presented, and which token the slot actually held at that moment.
+   *
+   * The checker judges these; it does not ask the plane whether it thinks it did
+   * the right thing. An earlier version took the plane's own `staleReleases`
+   * list — which recorded *rejected* attempts — and reported a violation for
+   * every one, so correctly refusing a stale release was scored as a failure.
+   * A checker that trusts the thing it is checking is not a checker.
+   */
+  readonly acceptedReleases: readonly AcceptedRelease[];
   /** Replay-log ids in the order they were assigned. */
   readonly replayIds: readonly number[];
   /** Distinct effects applied, keyed by the identity that must be unique. */
@@ -160,19 +177,23 @@ function checkI4(s: CheckableState): Violation[] {
  */
 function checkI5(s: CheckableState): Violation[] {
   const out: Violation[] = [];
-  for (const slot of s.doubleReleases) {
-    out.push({
-      invariant: "I5",
-      vtime: s.vtime,
-      detail: `slot ${slot} was released more than once`,
-    });
-  }
-  for (const slot of s.staleReleases) {
-    out.push({
-      invariant: "I5",
-      vtime: s.vtime,
-      detail: `slot ${slot} was released by a holder with a stale fencing token`,
-    });
+  for (const r of s.acceptedReleases) {
+    if (r.tokenUsed !== r.tokenCurrent) {
+      out.push({
+        invariant: "I5",
+        vtime: s.vtime,
+        detail:
+          `slot ${r.slotId} release ACCEPTED with token ${r.tokenUsed} while the slot ` +
+          `held ${r.tokenCurrent} — a stale claimant freed a slot it no longer owned`,
+      });
+    }
+    if (r.priorReleasesOfGeneration > 0) {
+      out.push({
+        invariant: "I5",
+        vtime: s.vtime,
+        detail: `slot ${r.slotId} was released ${r.priorReleasesOfGeneration + 1} times in one generation`,
+      });
+    }
   }
   return out;
 }

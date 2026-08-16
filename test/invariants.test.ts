@@ -47,8 +47,7 @@ function healthy(): CheckableState {
       ["slot-1", 4],
       ["slot-2", 5],
     ]),
-    doubleReleases: [],
-    staleReleases: [],
+    acceptedReleases: [],
     replayIds: [1, 2, 3, 7, 9],
     effectCounts: new Map([
       ["msg-a", 1],
@@ -129,14 +128,53 @@ describe("invariant checker — every invariant must be able to FAIL", () => {
     expect(checkAll(s).map((x) => x.invariant)).toContain("I4");
   });
 
-  it("I5 catches a double release", () => {
-    const s = { ...healthy(), doubleReleases: ["slot-1"] };
+  it("I5 catches a release ACCEPTED twice in one generation", () => {
+    const s = {
+      ...healthy(),
+      acceptedReleases: [
+        {
+          slotId: "slot-1",
+          tokenUsed: 4,
+          tokenCurrent: 4,
+          priorReleasesOfGeneration: 1,
+        },
+      ],
+    };
     expect(checkAll(s).map((x) => x.invariant)).toContain("I5");
   });
 
-  it("I5 catches a release by a stale fencing token", () => {
-    const s = { ...healthy(), staleReleases: ["slot-2"] };
+  it("I5 catches a release ACCEPTED with a stale fencing token", () => {
+    const s = {
+      ...healthy(),
+      acceptedReleases: [
+        {
+          slotId: "slot-2",
+          tokenUsed: 3,
+          tokenCurrent: 9,
+          priorReleasesOfGeneration: 0,
+        },
+      ],
+    };
     expect(checkAll(s).map((x) => x.invariant)).toContain("I5");
+  });
+
+  it("I5 stays SILENT when a stale release was correctly REFUSED", () => {
+    // The regression this encodes: an earlier checker took the plane's list of
+    // rejected stale attempts and reported each as a violation, so the fencing
+    // token doing its job was scored as a failure. A checker that trusts the
+    // thing it is checking is not a checker — it judges accepted releases only.
+    const s = {
+      ...healthy(),
+      acceptedReleases: [
+        {
+          slotId: "slot-1",
+          tokenUsed: 7,
+          tokenCurrent: 7,
+          priorReleasesOfGeneration: 0,
+        },
+      ],
+    };
+    expect(checkAll(s).map((x) => x.invariant)).not.toContain("I5");
   });
 
   it("I6 catches capacity orphaned past the liveness bound", () => {

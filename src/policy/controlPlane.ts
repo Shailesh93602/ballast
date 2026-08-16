@@ -1,4 +1,5 @@
 import { sortedMapEntries } from "../core/order.js";
+import type { AcceptedRelease } from "../oracle/invariants.js";
 import { ReplayLog } from "./replayLog.js";
 import {
   type AdmitOutcome,
@@ -58,8 +59,13 @@ export class ControlPlane {
   // Monotonic counters — never decremented. I3 is built on these.
   private claimsGranted = 0;
   private releasesDone = 0;
-  private doubleReleases: string[] = [];
-  private staleReleases: string[] = [];
+  /** Rejected stale/double attempts — observability only, NOT a violation. */
+  private staleReleaseAttempts = 0;
+  private doubleReleaseAttempts = 0;
+  /** Releases the plane ACCEPTED, recorded as facts for the checker to judge. */
+  private acceptedReleases: AcceptedRelease[] = [];
+  /** slotId -> how many accepted releases in the slot's current generation. */
+  private releasesThisGeneration = new Map<string, number>();
   private effectCounts = new Map<string, number>();
 
   constructor(config: ControlPlaneConfig) {
@@ -101,8 +107,9 @@ export class ControlPlane {
     return {
       claimsGranted: this.claimsGranted,
       releasesDone: this.releasesDone,
-      doubleReleases: [...this.doubleReleases],
-      staleReleases: [...this.staleReleases],
+      acceptedReleases: [...this.acceptedReleases],
+      staleReleaseAttempts: this.staleReleaseAttempts,
+      doubleReleaseAttempts: this.doubleReleaseAttempts,
     };
   }
 
@@ -194,6 +201,7 @@ export class ControlPlane {
     free.token = this.nextToken++;
     free.leaseUntil = now + this.config.leaseTicks;
     free.released = false;
+    this.releasesThisGeneration.set(free.id, 0);
     this.claimsGranted++;
     // Credit is debited AT CLAIM (SEMANTICS A3) — the single most consequential
     // row in the document. Debiting at admit bills for work that may never run;
@@ -227,14 +235,27 @@ export class ControlPlane {
     if (slot === undefined) return { ok: false, reason: "not-held" };
 
     if (slot.released) {
-      this.doubleReleases.push(slotId);
+      this.doubleReleaseAttempts++;
       return { ok: false, reason: "already-released" };
     }
     if (slot.tenant === null) return { ok: false, reason: "not-held" };
     if (slot.token !== token) {
-      this.staleReleases.push(slotId);
+      // Correctly REFUSED. An attempt is not a violation — the fencing token
+      // did its job. Recorded as a counter so the corpus can show the case was
+      // actually exercised rather than merely possible.
+      this.staleReleaseAttempts++;
       return { ok: false, reason: "stale-token" };
     }
+
+    // Accepted. Record the raw facts and let the checker judge them.
+    const prior = this.releasesThisGeneration.get(slotId) ?? 0;
+    this.acceptedReleases.push({
+      slotId,
+      tokenUsed: token,
+      tokenCurrent: slot.token,
+      priorReleasesOfGeneration: prior,
+    });
+    this.releasesThisGeneration.set(slotId, prior + 1);
 
     // SEMANTICS D5 — the slot returns to the pool and to the tenant's cap in one
     // step. Any window where one has happened and the other has not is a window
@@ -290,6 +311,19 @@ export class ControlPlane {
     if (!run.effectApplied) {
       run.effectApplied = true;
       this.effectCounts.set(runId, (this.effectCounts.get(runId) ?? 0) + 1);
+    }
+
+    // SEMANTICS B6 — completion is terminal and frees capacity atomically with
+    // recording the effect. Added as an amendment after the differential oracle
+    // caught the gap: the implementation used to hold the slot until an explicit
+    // release or lease expiry, so a finished run kept occupying the pool.
+    if (run.slotId !== null) {
+      const slot = this.slots.find((sl) => sl.id === run.slotId);
+      if (slot !== undefined && slot.tenant !== null) {
+        slot.tenant = null;
+        slot.runId = null;
+        this.releasesDone++;
+      }
     }
     const replayId = this.log.append({
       vtime: now,
