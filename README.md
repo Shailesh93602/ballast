@@ -1,0 +1,151 @@
+# BALLAST
+
+A deterministic simulation of a **multi-tenant session control plane** — per-tenant
+parallel caps, a rolling credit window, a finite warm pool, leases over a
+substrate that lies, and an at-least-once completion channel built as a replay
+log with opaque replay IDs and subscriber-driven credit flow control.
+
+One integer seed in. One byte-identical decision log out.
+
+**Zero runtime dependencies.** `git clone && npm install && npm test`.
+
+---
+
+## What it found
+
+A test suite is worth what it caught, not what it asserts. These are real bugs,
+found by the harness, that nobody planted. Planted mutants live in
+[`MUTATION.md`](docs/MUTATION.md) and are deliberately kept out of this list.
+
+| #      | Found by                    | What                                                                                                                                                                                     |
+| ------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent. |
+| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.           |
+| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                      |
+| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.               |
+| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                              |
+| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                 |
+
+Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
+
+**L2 is the one worth reading.** The two engines were built from the same
+specification but not the same assumption, so they **disagreed instead of being
+confidently wrong together**. Had one author written both in one sitting they
+would have matched, the differential would have been green, and finished runs
+would have silently occupied pool slots until their leases aged out.
+
+That is the entire argument for [`SEMANTICS.md`](docs/SEMANTICS.md) existing —
+and being committed — before a line of policy code.
+
+---
+
+## Prior art
+
+The techniques here are not mine and are named rather than implied.
+
+- **Deterministic simulation testing** is FoundationDB's approach, and TigerBeetle's.
+- **Delta debugging** (`ddmin`) is Zeller & Hildebrandt, 2002.
+- **Fencing tokens** for stale-claimant exclusion are Kleppmann's framing of the
+  Redlock critique.
+- The **replay-log contract** — opaque replay IDs, bounded retention,
+  resubscribe-from-ID, subscriber credit — restates the shape of Salesforce's
+  Pub/Sub API.
+
+What is mine is the harness: the invariants, the way each oracle is checked
+against its own vacuity, and the finding ledger.
+
+---
+
+## The design decisions worth arguing about
+
+**Three operations.** `admit`, `release`, `complete`. That is the whole API, and
+keeping it there is deliberate: every extra operation needs its own acceptance
+testing, and breadth is what makes a project expensive to verify. The surface is
+narrow so the depth behind it can be real — eight invariants, a reference oracle,
+a mutation corpus and a shrinker, all pointed at three entry points.
+
+**The cap is checked _inside_ the claim.** Splitting the check from the mutation
+is the classic race: two admits both observe `inFlight = cap - 1`, both conclude
+there is room, both proceed. The predicate is part of the write.
+
+**Credit is debited at claim**, which makes the credit ledger and the concurrency
+cap one mechanism rather than two that disagree. Debiting at admit bills for work
+that may never run; debiting at completion cannot bound concurrency at all.
+
+**A subscriber at zero credit pauses; it never drops.** A completion stream is a
+_fold_ — the subscriber's view is the accumulation of every entry it has seen — so
+dropping does not degrade that view, it corrupts it, permanently and silently.
+
+**Credit decrements on acknowledgement, not on send.** Decrementing on send
+measures what the publisher emitted rather than what the subscriber absorbed, so
+a dead subscriber would never apply backpressure, which is the entire point.
+
+Every one of these traces to a numbered row in [`SEMANTICS.md`](docs/SEMANTICS.md).
+
+---
+
+## What the oracles cannot do
+
+Stated here rather than left to be discovered.
+
+**The differential is blind to a shared misunderstanding.** The reference and the
+implementation have one author and one specification. It validates
+implementation-against-intent; it cannot validate intent-against-reality. If a
+spec row is wrong, both halves are wrong together and the test passes. That is
+why the invariants exist independently of it.
+
+**I8 is blind to a wrong identity.** It counts effects per identity, so keying a
+dedup on the wrong field produces two rows each with a legitimate count of one.
+Recorded as a test in `khatago.test.ts` rather than omitted.
+
+**The KhataGO verification is of the PROTOCOL, not the implementation.** It shows
+the mechanism is sound. It does not show that KhataGO's Prisma calls implement
+the mechanism faithfully — that needs the real handler driven against a real
+database, which is Tier B and has not run yet.
+
+**The claim protocol has no reaper.** A claimant that dies leaves its row stuck in
+`PROCESSING` forever. Asserted as a test so it cannot quietly stop being true.
+
+---
+
+## Numbers
+
+Every figure below is produced by a test in this repository. A CI job greps this
+file for each one and fails if the run does not reproduce it.
+
+- **1,000 seeds** byte-identical, in-process and across a fresh process, against
+  the built artifact
+- **134 tests**
+- **86.2% mutation score** over `src/policy` (100 of 116 mechanical mutants killed)
+- **16 of 16** semantic mutants caught
+- **2,000 invariant histories**, checked after _every_ event
+- **300 differential histories**
+- **500 KhataGO protocol runs** under the fault injector
+- Fairness: per-tenant caps **1.000×** degradation; global FIFO starves a
+  well-behaved tenant outright in **38 of 60** seeds
+
+---
+
+## Layout
+
+```
+src/core/      seeded PRNG, virtual clock, event queue, decision log, ordering
+src/sim/       the substrate that lies
+src/policy/    the control plane, the replay log, KhataGO's claim protocol
+src/oracle/    invariants, the reference scheduler, the shrinker
+docs/          SEMANTICS · DETERMINISM · LEDGER · MUTATION · FAIRNESS
+scripts/       the mutation harness
+```
+
+## Running it
+
+```bash
+npm install
+npm test                       # everything, ~4s
+npm run gate                   # lint + type-check + test + build + format
+node scripts/mutate.mjs        # mutation testing (slow — spawns a suite per mutant)
+node dist/cli/index.js simulate --seed 4711
+```
+
+See [`DETERMINISM.md`](docs/DETERMINISM.md) for what the reproducibility
+guarantee rests on, and what is banned inside the simulation core to keep it.
