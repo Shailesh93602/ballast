@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The exact gate, whole-repo, never per-file. Running a subset is how a
+      # broken script reaches main.
+      - run: npm run lint
+      - run: npm run type-check
+      - run: npm run test
+      - run: npm run build
+      - run: npm run format:check
+
+  # Mutation testing spawns a full suite per mutant, so it is too slow for every
+  # push. It runs on a schedule and can be triggered by hand — but the score it
+  # produces is asserted against the README by `npm test`, so a stale number
+  # fails the gate above regardless.
+  mutation:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/mutate.mjs
