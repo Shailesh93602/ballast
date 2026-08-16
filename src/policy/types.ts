@@ -39,7 +39,10 @@ export type ReleaseOutcome =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: "stale-token" | "not-held" | "already-released";
+      // No "already-released": a released slot has no tenant, so it is
+      // indistinguishable from never-claimed and reclaimed-after-expiry. One
+      // observable state, one answer.
+      readonly reason: "stale-token" | "not-held";
     };
 
 export type CompleteOutcome =

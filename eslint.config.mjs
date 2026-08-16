@@ -130,4 +130,12 @@ export default [
     files: ["test/**/*.ts", "src/cli/**/*.ts"],
     rules: { "no-restricted-syntax": "off" },
   },
+  {
+    // Build tooling: node scripts, outside the determinism perimeter by design.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: { process: "readonly", console: "readonly" },
+    },
+    rules: { "no-restricted-syntax": "off", "no-undef": "off" },
+  },
 ];

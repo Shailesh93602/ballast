@@ -28,10 +28,23 @@ import {
 interface Slot {
   readonly id: SlotId;
   tenant: TenantId | null;
-  runId: RunId | null;
   token: FencingToken;
   leaseUntil: number;
-  released: boolean;
+  /**
+   * NOTE: there is deliberately no `runId` or `released` flag here.
+   *
+   * `released` was assigned `false` in four places and `true` in none, so the
+   * `if (slot.released)` branch that guarded double-release was UNREACHABLE —
+   * a second release fell through to the `tenant === null` check and answered
+   * `not-held` instead of `already-released`. Refused either way, but with a
+   * misleading reason and a field that looked load-bearing while doing nothing.
+   * Mechanical mutation found it: deleting each assignment changed no
+   * observable behaviour, which is the signature of dead state.
+   *
+   * There is no `runId` either. It was assigned in five places and read in
+   * none — run identity lives on `RunState` and in the decision log, which is
+   * where anything actually looks for it.
+   */
 }
 
 interface RunState {
@@ -41,6 +54,8 @@ interface RunState {
   status: "admitted" | "completed" | "cancelled";
   /** Set once the effect has been applied — I8's identity. */
   effectApplied: boolean;
+  /** The replay id assigned when this run completed, so duplicates can echo it. */
+  replayId?: number;
 }
 
 export class ControlPlane {
@@ -79,10 +94,8 @@ export class ControlPlane {
       this.slots.push({
         id: `slot-${i}`,
         tenant: null,
-        runId: null,
         token: 0,
         leaseUntil: 0,
-        released: false,
       });
     }
     this.log = new ReplayLog(config.retentionCount, config.retentionTicks);
@@ -151,8 +164,6 @@ export class ControlPlane {
     for (const s of this.slots) {
       if (s.tenant !== null && s.leaseUntil <= now) {
         s.tenant = null;
-        s.runId = null;
-        s.released = false;
         this.releasesDone++;
       }
     }
@@ -197,10 +208,8 @@ export class ControlPlane {
     if (free === undefined) return { ok: false, reason: "pool-full" };
 
     free.tenant = tenant;
-    free.runId = runId;
     free.token = this.nextToken++;
     free.leaseUntil = now + this.config.leaseTicks;
-    free.released = false;
     this.releasesThisGeneration.set(free.id, 0);
     this.claimsGranted++;
     // Credit is debited AT CLAIM (SEMANTICS A3) — the single most consequential
@@ -234,11 +243,13 @@ export class ControlPlane {
     const slot = this.slots.find((s) => s.id === slotId);
     if (slot === undefined) return { ok: false, reason: "not-held" };
 
-    if (slot.released) {
+    // A slot with no tenant is not held — which covers "already released",
+    // "never claimed" and "reclaimed after lease expiry" alike. There is one
+    // observable state, so there is one answer.
+    if (slot.tenant === null) {
       this.doubleReleaseAttempts++;
-      return { ok: false, reason: "already-released" };
+      return { ok: false, reason: "not-held" };
     }
-    if (slot.tenant === null) return { ok: false, reason: "not-held" };
     if (slot.token !== token) {
       // Correctly REFUSED. An attempt is not a violation — the fencing token
       // did its job. Recorded as a counter so the corpus can show the case was
@@ -261,8 +272,6 @@ export class ControlPlane {
     // step. Any window where one has happened and the other has not is a window
     // where I1 and I2 disagree.
     slot.tenant = null;
-    slot.runId = null;
-    slot.released = false;
     this.releasesDone++;
     void now;
     return { ok: true };
@@ -300,10 +309,14 @@ export class ControlPlane {
     if (run.status === "completed") {
       // Already done. Ack the duplicate so the sender stops retrying, and do
       // NOT touch the effect count — that is I8's whole assertion.
-      const existing = this.log
-        .assignedIds()
-        .find((id) => id > 0 && this.findRunForId(id) === runId);
-      return { ok: true, replayId: existing ?? 0, duplicate: true };
+      //
+      // Return the ORIGINAL replay id. An earlier version searched the log via a
+      // helper that always returned undefined, so every duplicate answered with
+      // replayId 0 — a caller correlating the ack to a log position would have
+      // been silently misled. Mechanical mutation surfaced it: flipping the
+      // comparison inside that search changed nothing, which is what dead code
+      // looks like from the outside.
+      return { ok: true, replayId: run.replayId ?? 0, duplicate: true };
     }
 
     // The CAS: only the transition out of `admitted` applies the effect.
@@ -321,7 +334,6 @@ export class ControlPlane {
       const slot = this.slots.find((sl) => sl.id === run.slotId);
       if (slot !== undefined && slot.tenant !== null) {
         slot.tenant = null;
-        slot.runId = null;
         this.releasesDone++;
       }
     }
@@ -331,6 +343,7 @@ export class ControlPlane {
       runId,
       outcome,
     });
+    run.replayId = replayId;
     this.log.evict(now);
     return { ok: true, replayId, duplicate: false };
   }
@@ -356,16 +369,11 @@ export class ControlPlane {
       const slot = this.slots.find((s) => s.id === run.slotId);
       if (slot !== undefined && slot.tenant !== null) {
         slot.tenant = null;
-        slot.runId = null;
         this.releasesDone++;
       }
     }
     void now;
     return "cancelled";
-  }
-
-  private findRunForId(_id: number): string | undefined {
-    return undefined;
   }
 
   /** Independent recomputation of credits, for I4's differential check. */

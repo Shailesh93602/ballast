@@ -8,11 +8,14 @@ Planted mutants live in `MUTATION.md` and are **not** listed here. Promoting a
 planted bug to a "discovery" would make this document worthless, and an
 interviewer will ask which is which.
 
-| #   | Found by                          | Severity     | What                                                    |
-| --- | --------------------------------- | ------------ | ------------------------------------------------------- |
-| L1  | Invariant corpus, 2,000 histories | 🔴 checker   | **I5 fired on correctly-refused stale releases**        |
-| L2  | Differential, seed 1              | 🔴 spec gap  | **Nothing said whether completion releases the slot**   |
-| L3  | Differential, seed 101            | 🟠 reference | **Rejected-then-cancelled runs were billed for credit** |
+| #   | Found by                          | Severity       | What                                                                           |
+| --- | --------------------------------- | -------------- | ------------------------------------------------------------------------------ |
+| L1  | Invariant corpus, 2,000 histories | 🔴 checker     | **I5 fired on correctly-refused stale releases**                               |
+| L2  | Differential, seed 1              | 🔴 spec gap    | **Nothing said whether completion releases the slot**                          |
+| L3  | Differential, seed 101            | 🟠 reference   | **Rejected-then-cancelled runs were billed for credit**                        |
+| L4  | Mechanical mutation               | 🟠 dead code   | **`slot.released` never set true — the double-release branch was unreachable** |
+| L5  | Mechanical mutation               | 🟡 dead code   | **`slot.runId` written five times, read never**                                |
+| L6  | Mechanical mutation               | 🟠 correctness | **Every duplicate completion answered `replayId: 0`**                          |
 
 ---
 
