@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { replayTrace } from "../core/replay.js";
 import { DEFAULT_CONFIG, runSimulation, NaivePolicy } from "../core/simulate.js";
 
 /**
@@ -14,6 +15,7 @@ interface Args {
   readonly seed: number;
   readonly out: string | undefined;
   readonly hashOnly: boolean;
+  readonly trace: string | undefined;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -21,6 +23,7 @@ function parseArgs(argv: readonly string[]): Args {
   let seed = 1;
   let out: string | undefined;
   let hashOnly = false;
+  let trace: string | undefined;
 
   for (let i = 1; i < argv.length; i++) {
     const flag = argv[i];
@@ -35,9 +38,12 @@ function parseArgs(argv: readonly string[]): Args {
       out = argv[++i];
     } else if (flag === "--hash-only") {
       hashOnly = true;
+    } else if (flag === "--trace") {
+      trace = argv[++i];
+      if (trace === undefined) throw new Error("--trace requires a path");
     }
   }
-  return { command, seed, out, hashOnly };
+  return { command, seed, out, hashOnly, trace };
 }
 
 function usage(): void {
@@ -47,6 +53,11 @@ function usage(): void {
       "",
       "  ballast simulate --seed N [--out log.jsonl] [--hash-only]",
       "      Run one simulation. Prints the decision-log hash.",
+      "",
+      "  ballast replay --trace log.jsonl",
+      "      Re-check a RECORDED trace. Seedless, offline, and independent of",
+      "      the current source — so a shrunk failure stays reproducible across",
+      "      the very edits you are making to fix it.",
       "",
       "  ballast help",
       "",
@@ -62,6 +73,33 @@ function main(): number {
   if (args.command === "help" || args.command === "--help") {
     usage();
     return 0;
+  }
+
+  if (args.command === "replay") {
+    if (args.trace === undefined) {
+      console.error("replay requires --trace <path>");
+      return 2;
+    }
+
+    const report = replayTrace(readFileSync(args.trace, "utf8"));
+
+    console.log(`records     ${report.records}`);
+    console.log(`tenants     ${report.tenants.join(", ") || "(none)"}`);
+    for (const [kind, count] of [...report.kindCounts].sort()) {
+      console.log(`  ${kind.padEnd(16)}${count}`);
+    }
+
+    if (report.problems.length === 0) {
+      console.log("\nstructure   OK");
+      return 0;
+    }
+
+    // Non-zero exit, so this is usable as a gate rather than only as a report.
+    console.error(`\n${report.problems.length} structural problem(s):`);
+    for (const problem of report.problems) {
+      console.error(`  seq ${problem.seq}: ${problem.message}`);
+    }
+    return 1;
   }
 
   if (args.command === "simulate") {
