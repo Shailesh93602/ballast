@@ -63,7 +63,13 @@ export function replayTrace(text: string): ReplayReport {
 
   let previousVtime = Number.NEGATIVE_INFINITY;
 
-  records.forEach((record, index) => {
+  // An explicit indexed loop rather than forEach: this repo bans `x.forEach`
+  // so that iteration order is visible at the call site, and here the index is
+  // load-bearing anyway — `seq` is checked against the record's POSITION.
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (record === undefined) continue;
+
     // `seq` is the record's identity, not a decoration. A gap means the trace
     // was truncated or spliced, and a shrunk trace that lost records silently
     // is worse than one that fails loudly.
@@ -103,7 +109,7 @@ export function replayTrace(text: string): ReplayReport {
 
     kindCounts.set(record.kind, (kindCounts.get(record.kind) ?? 0) + 1);
     if (record.tenant !== "") tenants.add(record.tenant);
-  });
+  }
 
   return {
     records: records.length,
