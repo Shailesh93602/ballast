@@ -115,7 +115,7 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **147 tests**
+- **155 tests**
 - **86.2% mutation score** over `src/policy` (100 of 116 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
@@ -144,8 +144,17 @@ npm install
 npm test                       # everything, ~4s
 npm run gate                   # lint + type-check + test + build + format
 node scripts/mutate.mjs        # mutation testing (slow — spawns a suite per mutant)
-node dist/cli/index.js simulate --seed 4711
+node dist/cli/index.js simulate --seed 4711 --out run.jsonl
+node dist/cli/index.js replay --trace run.jsonl
 ```
+
+`simulate` reproduces a run by re-executing it, so its answer depends on the
+code being unchanged — the moment you edit the policy to investigate, the seed
+stops reproducing the trace you were looking at. `replay` re-checks a **recorded**
+trace instead: seedless, offline, and independent of the current source, so a
+shrunk failure stays reproducible across the very edits you are making to fix it.
+It exits non-zero on a structurally broken trace, so it works as a gate and not
+only as a report.
 
 See [`DETERMINISM.md`](docs/DETERMINISM.md) for what the reproducibility
 guarantee rests on, and what is banned inside the simulation core to keep it.
