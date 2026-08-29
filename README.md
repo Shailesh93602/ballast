@@ -108,6 +108,36 @@ database, which is Tier B and has not run yet.
 
 ---
 
+## The flash-sale arm
+
+`src/policy/flashSale.ts` models the classic never-oversell problem — N units,
+far more buyers, consistency chosen over availability — as a third policy behind
+the same checker. It is the same shape as this repo's admission control one
+layer down: a per-tenant concurrency cap and a per-SKU stock count are both a
+bounded resource under contention.
+
+Three strategies differing **only** in how they claim a unit:
+
+| Strategy             | Oversells?                          | Retries under contention         |
+| -------------------- | ----------------------------------- | -------------------------------- |
+| `read-then-write`    | **yes** — sells the last unit twice | 0 (it never retries)             |
+| `conditional-update` | no                                  | 0 — there is no window to lose   |
+| `optimistic-version` | no                                  | >0 — every loser redoes its work |
+
+The interleaving is an **input**, not a race the test hopes to hit, so the
+overselling replays byte-identically every run.
+
+Two details the tests exist to pin down. Every read the naive strategy makes is
+**correct at the moment it happens** — the bug is acting on it after it stopped
+being true, which is why it survives review. And `oversold` is derived from the
+recorded outcomes rather than from the strategy's own tally, because a strategy
+that miscounts its sales must not be able to report zero.
+
+`optimistic-version` is included precisely to argue against itself here: it is
+correct and strictly more expensive, and for "subtract one if positive" a WHERE
+clause already says everything. It earns its cost only when the update needs
+logic a predicate cannot express.
+
 ## Numbers
 
 Every figure below is produced by a test in this repository. A CI job greps this
@@ -115,7 +145,7 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **155 tests**
+- **171 tests**
 - **86.2% mutation score** over `src/policy` (100 of 116 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
