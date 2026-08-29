@@ -173,6 +173,64 @@ docs/          SEMANTICS · DETERMINISM · LEDGER · MUTATION · FAIRNESS
 scripts/       the mutation harness
 ```
 
+## See it work
+
+Real output, not a screenshot — every command below is reproducible after
+`npm install && npm run build`, and the hashes are the ones you will get.
+
+**The same seed produces a byte-identical run, in separate processes:**
+
+```console
+$ node dist/cli/index.js simulate --seed 4711 --hash-only
+1fe23d51bb0a8241f7f5fc2aed878692dc7329c7abcab7ecd46ee42e84b018ad
+
+$ node dist/cli/index.js simulate --seed 4711 --hash-only
+1fe23d51bb0a8241f7f5fc2aed878692dc7329c7abcab7ecd46ee42e84b018ad
+
+$ node dist/cli/index.js simulate --seed 4712 --hash-only
+9aae9611ee24b85de9d04933666f4fc043d0ade80c6c4dfed8a550957b307ebf
+```
+
+That is the whole premise in three commands. A concurrency bug that reproduces
+on demand is a bug; one that does not is a research project.
+
+**Record a trace and re-check it offline:**
+
+```console
+$ node dist/cli/index.js simulate --seed 4711 --out run.jsonl
+$ node dist/cli/index.js replay --trace run.jsonl
+records     39
+tenants     acme, globex, initech
+  admit           15
+  reject          9
+  release         15
+
+structure   OK
+```
+
+`replay` is seedless and independent of the current source, so a shrunk failure
+stays reproducible across the very edits you are making to fix it. `simulate`
+cannot do that — it re-executes, so its answer changes the moment you touch the
+policy.
+
+**And it detects a trace that has been truncated or spliced:**
+
+```console
+$ head -20 run.jsonl > spliced.jsonl && tail -12 run.jsonl >> spliced.jsonl
+$ node dist/cli/index.js replay --trace spliced.jsonl
+...
+7 structural problem(s):
+  seq 27: seq is 27 but the record is at position 20 — the trace is not contiguous
+  seq 28: seq is 28 but the record is at position 21 — the trace is not contiguous
+  ...
+$ echo $?
+1
+```
+
+Non-zero exit, so it gates rather than merely reporting. A shrunk trace that
+quietly lost records is worse than one that fails loudly — every conclusion
+drawn from it is about a run that never happened.
+
 ## Running it
 
 ```bash
