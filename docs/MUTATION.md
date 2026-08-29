@@ -18,19 +18,19 @@ for a correctness argument.
 ## Result
 
 - Mutants generated: **165**
-- Killed: **144**
-- Survived: **21**
-- **Mutation score: 87.3%**
+- Killed: **158**
+- Survived: **7**
+- **Mutation score: 95.8%**
 
 ## Operators
 
-| Operator                        | Meaning                                       |
-| ------------------------------- | --------------------------------------------- |
-| `cmp:>=->>` / `cmp:<=-><`       | boundary flip — catches off-by-one at a limit |
-| `cmp:===->!==` / `cmp:!==->===` | equality inversion                            |
-| `offbyone:+1` / `offbyone:-1`   | drop an increment/decrement                   |
-| `bool:negate-if`                | invert a branch condition                     |
-| `delete:statement`              | remove one assignment/increment entirely      |
+| Operator | Meaning |
+| --- | --- |
+| `cmp:>=->>` / `cmp:<=-><` | boundary flip — catches off-by-one at a limit |
+| `cmp:===->!==` / `cmp:!==->===` | equality inversion |
+| `offbyone:+1` / `offbyone:-1` | drop an increment/decrement |
+| `bool:negate-if` | invert a branch condition |
+| `delete:statement` | remove one assignment/increment entirely |
 
 ## Survivors — every one must be triaged
 
@@ -41,28 +41,14 @@ A survivor is not automatically a bug. Triage each into:
 - **uncovered** — a real gap; write an invariant or a test
 - **acceptable** — reachable but immaterial, with the reason stated
 
-| File:line                        | Operator           | Original                                                           | Triage                                                                                                                                                                                                                |
-| -------------------------------- | ------------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/policy/controlPlane.ts:269` | `offbyone:+1`      | `this.releasesThisGeneration.set(slotId, prior + 1);`              | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:333` | `bool:negate-if`   | `if (run.slotId !== null) {`                                       | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:368` | `bool:negate-if`   | `if (run.slotId !== null) {`                                       | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:387` | `cmp:===->!==`     | `if (run.status === "cancelled" && run.slotId === null) continue;` | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:387` | `cmp:===->!==`     | `if (run.status === "cancelled" && run.slotId === null) continue;` | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:91`  | `delete:statement` | `this.creditsSpent.set(t.id, 0);`                                  | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:150` | `delete:statement` | `this.currentWindow = window;`                                     | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:250` | `delete:statement` | `this.doubleReleaseAttempts++;`                                    | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:269` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);`              | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/controlPlane.ts:325` | `delete:statement` | `run.effectApplied = true;`                                        | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/flashSale.ts:178`    | `offbyone:-1`      | `row.write(inner.stock - 1);`                                      | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/flashSale.ts:251`    | `cmp:<=-><`        | `for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {`       | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/flashSale.ts:269`    | `cmp:===->!==`     | `reason: won === 1 ? "sold (interleaved)" : "sold out",`           | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/flashSale.ts:96`     | `delete:statement` | `this.version++;`                                                  | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/flashSale.ts:120`    | `delete:statement` | `this.version++;`                                                  | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/khatagoClaim.ts:86`  | `delete:statement` | `this.duplicateInserts++;`                                         | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/khatagoClaim.ts:134` | `delete:statement` | `row.committed = true;`                                            | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/khatagoClaim.ts:135` | `delete:statement` | `row.aiStatus = "DONE";`                                           | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/replayLog.ts:124`    | `cmp:<=-><`        | `if (available <= 0) return []; // paused, not dropping`           | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
-| `src/policy/replayLog.ts:148`    | `offbyone:+1`      | `sub.cursor = Math.max(sub.cursor, upToInclusive + 1);`            | **UNTRIAGED — write a test**                                                                                                                                                                                          |
-| `src/policy/replayLog.ts:148`    | `delete:statement` | `sub.cursor = Math.max(sub.cursor, upToInclusive + 1);`            | **UNTRIAGED — write a test**                                                                                                                                                                                          |
+| File:line | Operator | Original | Triage |
+| --- | --- | --- | --- |
+| `src/policy/controlPlane.ts:269` | `offbyone:+1` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation cannot happen: release nulls the tenant, so a repeat is refused not-held, and a re-admit resets the generation counter to 0. The counter and I5 are defensive depth against a future change to release() itself. |
+| `src/policy/controlPlane.ts:387` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
+| `src/policy/controlPlane.ts:387` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
+| `src/policy/controlPlane.ts:91` | `delete:statement` | `this.creditsSpent.set(t.id, 0);` | EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and rollWindowIfNeeded re-seeds the map on the first boundary; a missing constructor entry is indistinguishable from an explicit 0. |
+| `src/policy/controlPlane.ts:269` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
+| `src/policy/controlPlane.ts:325` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
+| `src/policy/replayLog.ts:124` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
 
-_Generated over 5 source files in `src/policy`._
+*Generated over 5 source files in `src/policy`.*

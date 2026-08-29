@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ControlPlane } from "../src/policy/controlPlane.js";
+import { runSale, StockRow } from "../src/policy/flashSale.js";
+import { KhataGoClaimModel } from "../src/policy/khatagoClaim.js";
 import { ReplayLog, type SubscriberState } from "../src/policy/replayLog.js";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
 
@@ -211,5 +213,138 @@ describe("killing mutation survivors — credit accounting", () => {
 
     // A run that was never admitted must not appear as having spent credit.
     expect(expected.get("")).toBeUndefined();
+  });
+});
+
+describe("killing mutation survivors — round 2 (post the negate-operator fix)", () => {
+  it("kills `delete currentWindow = window` — the quota binds INSIDE a later window", () => {
+    // The earlier window test never crossed a boundary, so the deletion was
+    // invisible: currentWindow stuck at 0 means every admit after the first
+    // boundary looks like a fresh window and credits reset on every call.
+    const plane = new ControlPlane({
+      tenants: [{ id: "t", cap: 5, creditsPerWindow: 1 }],
+      poolCapacity: 5,
+      windowTicks: 10,
+      leaseTicks: 1000,
+      retentionCount: 64,
+      retentionTicks: 500,
+    });
+    expect(plane.admit(0, "t", "a").ok).toBe(true);
+    expect(plane.admit(1, "t", "b").ok, "budget 1 binds in window 0").toBe(false);
+    expect(plane.admit(11, "t", "c").ok, "window 1 refills the budget").toBe(true);
+    const fourth = plane.admit(12, "t", "d");
+    expect(fourth.ok, "budget 1 must bind inside window 1 too").toBe(false);
+  });
+
+  it("kills `delete doubleReleaseAttempts++` — a repeat release is counted", () => {
+    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
+    const a = plane.admit(0, "acme", "r1");
+    expect(a.ok).toBe(true);
+    if (!a.ok) return;
+    expect(plane.release(1, a.slotId, a.token).ok).toBe(true);
+    const again = plane.release(2, a.slotId, a.token);
+    expect(again.ok).toBe(false);
+    expect(plane.counters.doubleReleaseAttempts, "the refusal must be recorded").toBe(1);
+  });
+
+  it("kills `delete version++` in write() — ANY write must invalidate an older read", () => {
+    const row = new StockRow(5);
+    const { version } = row.read();
+    row.write(4);
+    expect(
+      row.writeIfVersion(version, 9),
+      "a CAS with the pre-write version must fail",
+    ).toBe(0);
+  });
+
+  it("kills `delete version++` in decrementIfPositive() — the conditional update moves the version", () => {
+    const row = new StockRow(5);
+    const { version } = row.read();
+    expect(row.decrementIfPositive()).toBe(1);
+    expect(
+      row.writeIfVersion(version, 9),
+      "a CAS with the pre-decrement version must fail",
+    ).toBe(0);
+  });
+
+  it("kills `write(stock - 1) -> write(stock)` in the naive window — oversell is EXACTLY one here", () => {
+    // Two interleaved buyers on one unit: the first consumes the unit, the
+    // second must see it gone. If the first buyer's write does not decrement,
+    // the second sells the same unit again and oversold inflates to 2.
+    const report = runSale("read-then-write", 1, [
+      { id: "A", interleavedBy: ["b1", "b2"] },
+      { id: "b1" },
+      { id: "b2" },
+    ]);
+    expect(report.sold).toBe(2);
+    expect(report.oversold, "one unit, one stale write: oversold is exactly 1").toBe(1);
+    expect(report.remainingStock).toBe(0);
+  });
+
+  it("kills `attempt <= MAX_RETRIES -> <` — success on the final permitted attempt counts", () => {
+    // Four contenders each burn one attempt; the fifth and last attempt wins.
+    const report = runSale("optimistic-version", 10, [
+      { id: "X", interleavedBy: ["c1", "c2", "c3", "c4"] },
+      { id: "c1" },
+      { id: "c2" },
+      { id: "c3" },
+      { id: "c4" },
+    ]);
+    const x = report.outcomes.find((o) => o.buyer === "X");
+    expect(x?.sold, "the 5th attempt is within MAX_RETRIES = 5").toBe(true);
+    expect(x?.attempts).toBe(5);
+  });
+
+  it("kills the interleaved-outcome label flip — a winner reads as a winner", () => {
+    const report = runSale("optimistic-version", 5, [
+      { id: "X", interleavedBy: ["c1"] },
+      { id: "c1" },
+    ]);
+    const c1 = report.outcomes.find((o) => o.buyer === "c1");
+    expect(c1?.sold).toBe(true);
+    expect(c1?.reason).toBe("sold (interleaved)");
+  });
+
+  it("kills `delete duplicateInserts++` — the duplicate delivery is counted", () => {
+    const model = new KhataGoClaimModel();
+    model.deliver("m1");
+    model.deliver("m1");
+    expect(model.stats.duplicateInserts).toBe(1);
+  });
+
+  it("kills `delete row.committed/aiStatus = DONE` — the protocol actually terminates", () => {
+    // Without these two writes the row stays PROCESSING forever: not done, not
+    // reclaimable — the exact leak the protocol exists to prevent.
+    const model = new KhataGoClaimModel();
+    const out = model.deliver("m1");
+    expect(out.claimed).toBe(true);
+    const row = model.messages.get("m1");
+    expect(row?.committed, "the effect must be recorded as committed").toBe(true);
+    expect(row?.aiStatus, "the terminal state is DONE").toBe("DONE");
+  });
+
+  it("kills `delete version++` in writeIfVersion() — a CAS win moves the version too", () => {
+    // Without it, ONE stale read can win two CASes: the second write silently
+    // overwrites the first with the same "proof" of freshness.
+    const row = new StockRow(5);
+    const { version } = row.read();
+    expect(row.writeIfVersion(version, 4)).toBe(1);
+    expect(
+      row.writeIfVersion(version, 3),
+      "the first CAS consumed that version; the second must fail",
+    ).toBe(0);
+  });
+
+  it("kills the ack-cursor mutants — acknowledged entries are never redelivered", () => {
+    const log = new ReplayLog(1000, 10_000);
+    for (let i = 0; i < 3; i++) {
+      log.append({ vtime: i, tenant: "t", runId: `r${i}`, outcome: "completed" });
+    }
+    const sub: SubscriberState = { name: "s", cursor: 1, credits: 10, inFlight: 0 };
+    expect(log.deliver(sub)).toHaveLength(3);
+    log.acknowledge(sub, 3, 10);
+    expect(sub.cursor, "the cursor moves past the last acked id").toBe(4);
+    expect(sub.inFlight, "acked entries leave the in-flight window").toBe(0);
+    expect(log.deliver(sub), "nothing acked may come back").toHaveLength(0);
   });
 });

@@ -82,12 +82,39 @@ function buildMutants() {
         op.find.lastIndex = 0;
         let match;
         while ((match = op.find.exec(line)) !== null) {
-          const mutatedLine =
-            op.name === "bool:negate-if"
-              ? line.slice(0, match.index) + "if (!" + line.slice(match.index + 4)
-              : line.slice(0, match.index) +
-                op.replace +
-                line.slice(match.index + match[0].length);
+          let mutatedLine;
+          if (op.name === "bool:negate-if") {
+            // Splicing `if (!` without parens does NOT negate: `if (a !== b)`
+            // became `if ((!a) !== b)` — always true, a vacuous mutant that
+            // "survives" and reads as a suite gap (found 2026-08-29 when a
+            // hand-applied REAL negation of a "survivor" failed the suite
+            // instantly). Wrap the full balanced condition instead.
+            const open = match.index + 4; // after "if ("
+            let depth = 1;
+            let close = -1;
+            for (let c = open; c < line.length; c++) {
+              if (line[c] === "(") depth++;
+              else if (line[c] === ")") {
+                depth--;
+                if (depth === 0) {
+                  close = c;
+                  break;
+                }
+              }
+            }
+            if (close === -1) continue; // condition spans lines — skip
+            mutatedLine =
+              line.slice(0, open) +
+              "!(" +
+              line.slice(open, close) +
+              ")" +
+              line.slice(close);
+          } else {
+            mutatedLine =
+              line.slice(0, match.index) +
+              op.replace +
+              line.slice(match.index + match[0].length);
+          }
           if (mutatedLine === line) continue;
           const mutatedLines = [...lines];
           mutatedLines[i] = mutatedLine;
@@ -218,18 +245,35 @@ console.log(`killed ${killed}/${selected.length}   mutation score ${score.toFixe
  * is `uncovered` gets a TEST, not an entry.
  */
 const TRIAGE = {
-  "src/policy/replayLog.ts:cmp:<=-><:available":
+  "src/policy/replayLog.ts:L124:cmp:<=-><":
     "EQUIVALENT — when `available` is exactly 0, the guarded path calls " +
     "readFrom(cursor, 0), which returns an empty list anyway. Behaviour is " +
     "identical either way; the guard is an early return, not a correctness check.",
+  "src/policy/controlPlane.ts:L91:delete:statement":
+    "EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and " +
+    "rollWindowIfNeeded re-seeds the map on the first boundary; a missing " +
+    "constructor entry is indistinguishable from an explicit 0.",
+  "src/policy/controlPlane.ts:L269:offbyone:+1":
+    "ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation " +
+    "cannot happen: release nulls the tenant, so a repeat is refused not-held, " +
+    "and a re-admit resets the generation counter to 0. The counter and I5 are " +
+    "defensive depth against a future change to release() itself.",
+  "src/policy/controlPlane.ts:L269:delete:statement":
+    "ACCEPTABLE (unreachable) — same argument as the off-by-one at this line.",
+  "src/policy/controlPlane.ts:L325:delete:statement":
+    "EQUIVALENT — complete() is guarded by the status CAS (early return on " +
+    "completed and cancelled), so `effectApplied` can never be consulted " +
+    "again on any reachable path; it is belt-and-braces for a refactor.",
+  "src/policy/controlPlane.ts:L387:cmp:===->!==":
+    "ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and " +
+    "a real tenant cannot exist: cancel-before-admit placeholders carry " +
+    'tenant "" and are skipped a line earlier; admitted runs always hold a ' +
+    "slotId. The clause is defensive.",
 };
 
 function triageFor(s) {
-  for (const [key, note] of Object.entries(TRIAGE)) {
-    const [file] = key.split(":");
-    if (relative(root, s.file) === file && key.includes(s.operator)) return note;
-  }
-  return null;
+  const key = `${relative(root, s.file)}:L${s.line}:${s.operator}`;
+  return TRIAGE[key] ?? null;
 }
 
 const report = [

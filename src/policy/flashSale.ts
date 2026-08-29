@@ -72,7 +72,7 @@ export interface SaleReport {
  * the caller, so the interleaving is deterministic and reproducible rather than
  * a race we hope to hit.
  */
-class StockRow {
+export class StockRow {
   private value: number;
   /** Bumped on every write. This is what optimistic concurrency compares. */
   private version = 0;

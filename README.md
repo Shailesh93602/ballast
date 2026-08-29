@@ -17,16 +17,17 @@ A test suite is worth what it caught, not what it asserts. These are real bugs,
 found by the harness, that nobody planted. Planted mutants live in
 [`MUTATION.md`](docs/MUTATION.md) and are deliberately kept out of this list.
 
-| #      | Found by                    | What                                                                                                                                                                                                |
-| ------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent.            |
-| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.                      |
-| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                                 |
-| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.                          |
-| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                                         |
-| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                            |
-| **L7** | Mutation run on a red suite | **The harness reported 100% because the suite already failed.** A mutant is killed when the suite fails — so if it fails first, every mutant is killed. The reassuring number was the alarming one. |
-| **L8** | Testing a surviving mutant  | **A retry-limit branch that could never run**, because contention in the model stopped after attempt 1. The fix corrected the model, not the branch — a busy row stays busy.                        |
+| #      | Found by                    | What                                                                                                                                                                                                                                                       |
+| ------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent.                                                                   |
+| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.                                                                             |
+| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                                                                                        |
+| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.                                                                                 |
+| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                                                                                                |
+| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                                                                                   |
+| **L7** | Mutation run on a red suite | **The harness reported 100% because the suite already failed.** A mutant is killed when the suite fails — so if it fails first, every mutant is killed. The reassuring number was the alarming one.                                                        |
+| **L8** | Testing a surviving mutant  | **A retry-limit branch that could never run**, because contention in the model stopped after attempt 1. The fix corrected the model, not the branch — a busy row stays busy.                                                                               |
+| **L9** | Hand-applying a "survivor"  | **The negation operator didn't negate.** `if (!` spliced without parens turned `if (a !== b)` into `(!a) !== b` — always true — so vacuous mutants "survived" and the score under-read at 87.3%. Fixed and honestly triaged: 95.8%, every survivor argued. |
 
 Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
 
@@ -173,8 +174,8 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **186 tests**
-- **87.3% mutation score** over `src/policy` (144 of 165 mechanical mutants killed)
+- **197 tests**
+- **95.8% mutation score** over `src/policy` (158 of 165 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
 - **300 differential histories**

@@ -18,6 +18,7 @@ interviewer will ask which is which.
 | L6  | Mechanical mutation               | 🟠 correctness | **Every duplicate completion answered `replayId: 0`**                           |
 | L7  | Mutation run on a red suite       | 🔴 harness     | **The mutation harness reported 100% because the suite already failed**         |
 | L8  | Writing a test for a mutant       | 🟠 dead code   | **The retry-limit branch was unreachable — contention stopped after attempt 1** |
+| L9  | Hand-applying a "survivor"        | 🟠 harness bug | **The negation operator didn't negate — vacuous mutants read as suite gaps**    |
 
 ---
 
@@ -168,3 +169,32 @@ and the probe finds exhaustion at stock=5 with 6 buyers.
 > **The lesson:** when a mutant survives, the interesting question is not always "which assertion is
 > missing." Sometimes it is "why does this code never execute", and the answer is that the _model_ is
 > too polite rather than the test being too weak.
+
+## L9 · The negation operator didn't negate
+
+**Found by:** distrusting a survivor. A mutant the suite "could not kill" was
+applied by hand — and the suite failed instantly, inside the very test written
+to kill it.
+
+**Symptom:** 20 untriaged survivors and an 87.3% score that would not move,
+including `bool:negate-if` survivors at lines whose kill-tests demonstrably
+worked.
+
+**Cause:** the operator spliced `if (!` into the line without wrapping the
+condition. `if (a !== b)` became `if ((!a) !== b)` — a boolean compared against
+a non-boolean, which is always true. Every "negation" at a comparison site was
+a vacuous mutant, surviving for reasons that had nothing to do with the suite.
+
+**The red herring, kept honest:** the first hypothesis was Vite's mtime-keyed
+transform cache serving the unmutated file to a run that rewrites the same path
+many times a second. A cold-cache rerun reproduced all 20 survivors
+byte-identically, so that claim was retracted from the runner's comments before
+the real cause was found.
+
+**Why it matters:** this is L7's lesson from the other side. L7 was the harness
+unable to tell success from catastrophe; L9 is an operator quietly measuring
+nothing. A mutation score is a measurement OF the harness as much as of the
+suite, and a broken operator under-reads silently — the "gaps" it reports cost
+real triage effort aimed at the wrong place. After fixing the operator and
+triaging honestly: 158/165 killed (95.8%), ten new kill-tests, and every
+survivor carrying an explicit equivalence or unreachability argument.
