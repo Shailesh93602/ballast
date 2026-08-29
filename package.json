@@ -19,14 +19,17 @@
     "test:watch": "vitest",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "gate": "npm run lint && npm run type-check && npm run test && npm run build && npm run format:check"
+    "gate": "npm run lint && npm run type-check && npm run test && npm run build && npm run format:check",
+    "flash-sale:real": "npm run build >/dev/null && node scripts/flash-sale-report.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
     "eslint": "^9.17.0",
+    "pg": "^8.23.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -144,6 +144,28 @@ correct and strictly more expensive, and for "subtract one if positive" a WHERE
 clause already says everything. It earns its cost only when the update needs
 logic a predicate cannot express.
 
+### And against a real Postgres
+
+The simulation names the race; `src/tierb/flashSaleReal.ts` confirms a real
+database exhibits it. Same three strategies over `pg` (a dev-only dependency —
+the library still has zero runtime dependencies), 200 concurrent buyers racing
+for 5 units, judged by counting the rows rather than trusting any strategy's
+tally. A representative local run (`npm run flash-sale:real` regenerates it —
+nothing below is stored, so nothing below can go stale):
+
+```
+strategy             sold  refused  OVERSOLD  conservation err  retries   ms
+read-then-write       200        0       195              -199        0   49
+conditional-update      5      195         0                 0        0   11
+optimistic-version      5      195         0                 0      748  103
+```
+
+The naive strategy sold two hundred of five units. The optimistic one is just
+as correct as the conditional one and paid 748 retries and ~10x the wall time
+for it — which is the actual trade-off the flash-sale question asks about.
+The suite skips (loudly) when no local `khatago_ballast` database exists, so
+CI stays honest without a Postgres service.
+
 ## Numbers
 
 Every figure below is produced by a test in this repository. A CI job greps this
@@ -151,7 +173,7 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **182 tests**
+- **186 tests**
 - **87.3% mutation score** over `src/policy` (144 of 165 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
