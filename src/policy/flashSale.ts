@@ -46,6 +46,19 @@ export interface SaleReport {
   readonly oversold: number;
   /** Total retries across all buyers — the price paid for correctness. */
   readonly totalRetries: number;
+  /**
+   * Stock left in the row when the sale ended.
+   *
+   * Reported because `sold` alone cannot detect a strategy that corrupts the
+   * count. A decrement that subtracts two, or a write that silently does
+   * nothing, leaves `sold` looking perfectly reasonable while the underlying
+   * row is wrong — and the row is what the next sale reads.
+   *
+   * Mutation testing found this gap: several mutants changed the arithmetic
+   * inside the row and every assertion still passed, because nothing ever
+   * looked at the row.
+   */
+  readonly remainingStock: number;
   readonly outcomes: readonly SaleOutcome[];
 }
 
@@ -70,6 +83,11 @@ class StockRow {
 
   read(): { stock: number; version: number } {
     return { stock: this.value, version: this.version };
+  }
+
+  /** The row as it actually stands — not what any strategy believes. */
+  get current(): number {
+    return this.value;
   }
 
   /** An UNGUARDED write. Whatever the caller computed, applied blindly. */
@@ -218,6 +236,18 @@ export function runSale(
        */
       case "optimistic-version": {
         const MAX_RETRIES = 5;
+        // Contention is SUSTAINED, not a one-off. An earlier version of this
+        // model let every interleaved buyer commit during attempt 1 only, which
+        // meant the retry could fail at most once and then always succeeded —
+        // making the retry-limit branch below UNREACHABLE. That is dead code
+        // dressed as defensive programming, and a reachability probe over every
+        // stock/buyer shape confirmed it never fired.
+        //
+        // One interleaved buyer commits per attempt instead. That is both more
+        // faithful — a busy row stays busy — and it makes exhaustion something
+        // the tests can actually reach.
+        const contenders = [...(buyer.interleavedBy ?? [])];
+
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           const { stock, version } = row.read();
           if (stock <= 0) {
@@ -229,18 +259,16 @@ export function runSale(
             };
           }
 
-          if (attempt === 1) {
-            for (const otherId of buyer.interleavedBy ?? []) {
-              if (consumed.has(otherId)) continue;
-              consumed.add(otherId);
-              const won = row.decrementIfPositive();
-              outcomes.push({
-                buyer: otherId,
-                sold: won === 1,
-                reason: won === 1 ? "sold (interleaved)" : "sold out",
-                attempts: 1,
-              });
-            }
+          const otherId = contenders.shift();
+          if (otherId !== undefined && !consumed.has(otherId)) {
+            consumed.add(otherId);
+            const won = row.decrementIfPositive();
+            outcomes.push({
+              buyer: otherId,
+              sold: won === 1,
+              reason: won === 1 ? "sold (interleaved)" : "sold out",
+              attempts: 1,
+            });
           }
 
           // Fails if the version moved — which is exactly what the interleaved
@@ -284,6 +312,7 @@ export function runSale(
     // A strategy that miscounts its own sales must not be able to report zero.
     oversold: Math.max(0, sold - initialStock),
     totalRetries,
+    remainingStock: row.current,
     outcomes,
   };
 }

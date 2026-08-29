@@ -145,8 +145,8 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **171 tests**
-- **86.2% mutation score** over `src/policy` (100 of 116 mechanical mutants killed)
+- **182 tests**
+- **87.3% mutation score** over `src/policy` (144 of 165 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
 - **300 differential histories**
