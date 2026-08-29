@@ -139,6 +139,31 @@ function runSuite() {
   }
 }
 
+/**
+ * Refuse to run against a failing suite.
+ *
+ * A mutant is judged KILLED when the suite fails with it applied. If the suite
+ * ALREADY fails, every mutant is killed and the harness reports a perfect
+ * score — the most dangerous possible output, because it looks like success.
+ *
+ * This happened: a stale test count in the README made three assertions fail,
+ * and the run reported 100% while genuinely surviving mutants went unnoticed.
+ * The number that should have raised an alarm was the reassuring one.
+ */
+if (!runSuite()) {
+  console.error(
+    [
+      "REFUSING TO RUN: the test suite fails before any mutation is applied.",
+      "",
+      "Every mutant would be scored KILLED and the result would read 100%,",
+      "because a mutant is killed by the suite failing — and it already does.",
+      "",
+      "Fix the suite, then re-run.",
+    ].join("\n"),
+  );
+  process.exit(1);
+}
+
 const mutants = buildMutants();
 const selected = QUICK ? mutants.filter((_, i) => i % 4 === 0) : mutants;
 
