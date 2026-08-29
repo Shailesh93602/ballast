@@ -17,16 +17,22 @@ A test suite is worth what it caught, not what it asserts. These are real bugs,
 found by the harness, that nobody planted. Planted mutants live in
 [`MUTATION.md`](docs/MUTATION.md) and are deliberately kept out of this list.
 
-| #      | Found by                    | What                                                                                                                                                                                     |
-| ------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent. |
-| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.           |
-| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                      |
-| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.               |
-| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                              |
-| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                 |
+| #      | Found by                    | What                                                                                                                                                                                                |
+| ------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent.            |
+| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.                      |
+| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                                 |
+| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.                          |
+| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                                         |
+| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                            |
+| **L7** | Mutation run on a red suite | **The harness reported 100% because the suite already failed.** A mutant is killed when the suite fails — so if it fails first, every mutant is killed. The reassuring number was the alarming one. |
+| **L8** | Testing a surviving mutant  | **A retry-limit branch that could never run**, because contention in the model stopped after attempt 1. The fix corrected the model, not the branch — a busy row stays busy.                        |
 
 Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
+
+Three of the eight were in the **checker or the harness**, not the system under test. That ratio is
+the most useful thing this project taught: every layer that grades another needs someone grading it,
+and eventually that someone is you asking what the output would look like if the tool were wrong.
 
 **L2 is the one worth reading.** The two engines were built from the same
 specification but not the same assumption, so they **disagreed instead of being
