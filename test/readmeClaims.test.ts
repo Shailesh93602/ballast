@@ -30,9 +30,15 @@ function testFiles(): string[] {
     .map((f) => readFileSync(join(root, "test", f), "utf8"));
 }
 
-/** Count `it(` occurrences across the suite — the honest test count. */
+/**
+ * Count `it(` occurrences across the suite — the honest test count.
+ *
+ * Any indentation, not exactly two spaces: a test inside a nested `describe`
+ * is still a test vitest runs, and a counter that skipped it would let the
+ * README under-report while the suite grew.
+ */
 function countTests(): number {
-  return testFiles().reduce((n, src) => n + (src.match(/^\s{2}it\(/gm) ?? []).length, 0);
+  return testFiles().reduce((n, src) => n + (src.match(/^\s+it\(/gm) ?? []).length, 0);
 }
 
 describe("README numbers are reproducible", () => {
@@ -110,6 +116,95 @@ describe("README numbers are reproducible", () => {
     // The starvation figure must be a real count over 60 seeds.
     expect(readme).toMatch(/\*\*38 of 60\*\*/);
     expect(src).toMatch(/seed <= 60/);
+  });
+
+  describe("the findings sentence is counted from LEDGER.md, not remembered", () => {
+    // The README once said "three of the eight" under a table with nine rows.
+    // The portfolio and the resume both quote this sentence, so it is asserted
+    // against the ledger's summary table — the same rows the portfolio's daily
+    // claim-check counts.
+    const ledger = readFileSync(join(root, "docs", "LEDGER.md"), "utf8");
+    const ledgerRows = ledger
+      .split("\n")
+      .filter((line) => /^\| L\d+ /.test(line))
+      .map((line) => {
+        const cells = line.split("|").map((c) => c.trim());
+        // | # | Found by | Severity | What |
+        return { id: cells[1] ?? "", foundBy: cells[2] ?? "", severity: cells[3] ?? "" };
+      });
+    // A finding is "in the checking apparatus" when its severity names the
+    // checker, the reference oracle or the harness rather than the system.
+    const apparatus = ledgerRows.filter((r) =>
+      /checker|reference|harness/i.test(r.severity),
+    );
+
+    const WORDS: Record<string, number> = {
+      one: 1,
+      two: 2,
+      three: 3,
+      four: 4,
+      five: 5,
+      six: 6,
+      seven: 7,
+      eight: 8,
+      nine: 9,
+      ten: 10,
+      eleven: 11,
+      twelve: 12,
+    };
+    const toNumber = (w: string): number => WORDS[w.toLowerCase()] ?? Number(w);
+
+    const sentence =
+      /(\w+) of the (\w+) were in the \*\*checker, the reference oracle or the harness\*\*[^.]*\./.exec(
+        readme,
+      );
+
+    it("the ledger table has at least one row and one apparatus finding", () => {
+      expect(ledgerRows.length).toBeGreaterThan(0);
+      expect(apparatus.length).toBeGreaterThan(0);
+    });
+
+    it("the README's 'N of the M' matches the ledger's row count and apparatus count", () => {
+      expect(
+        sentence,
+        "README must state how many findings were in the apparatus",
+      ).not.toBeNull();
+      const [, inApparatus = "", total = ""] = sentence!;
+      expect(
+        toNumber(total),
+        `README says ${total} findings; LEDGER.md's table has ${ledgerRows.length} rows`,
+      ).toBe(ledgerRows.length);
+      expect(
+        toNumber(inApparatus),
+        `README says ${inApparatus} were in the apparatus; LEDGER.md marks ` +
+          `${apparatus.length} (${apparatus.map((r) => r.id).join(", ")})`,
+      ).toBe(apparatus.length);
+    });
+
+    it("the sentence names exactly the ledger rows marked checker/reference/harness", () => {
+      expect(sentence).not.toBeNull();
+      const named = [...sentence![0].matchAll(/\bL(\d+)\b/g)]
+        .map((m) => `L${m[1]}`)
+        .sort();
+      expect(named).toEqual(apparatus.map((r) => r.id).sort());
+    });
+
+    it("the README table has one row per ledger row", () => {
+      const readmeRows = readme
+        .split("\n")
+        .filter((line) => /^\| \*\*L\d+\*\* /.test(line));
+      expect(readmeRows.length, "README table rows vs LEDGER table rows").toBe(
+        ledgerRows.length,
+      );
+    });
+
+    it("every ledger table row has a write-up section", () => {
+      // L4, L5 and L6 sat in the table for weeks with no section under it.
+      const missing = ledgerRows
+        .map((r) => r.id)
+        .filter((id) => !new RegExp(`^## ${id} `, "m").test(ledger));
+      expect(missing, "ledger rows with no `## Lx ·` write-up").toEqual([]);
+    });
   });
 
   it("claims zero runtime dependencies, and has zero", () => {

@@ -116,6 +116,107 @@ differential histories × 30 events, 1,000 determinism seeds × 3 runs._
 
 ---
 
+## L4 · A guard on a flag that nothing ever set
+
+**Found by:** the first mechanical-mutation run (M5 tier 2, 116 mutants, commit
+`f2bcfc2`) — `delete:statement` survivors at every `released = false`
+assignment.
+
+**Symptom:** deleting `s.released = false`, `free.released = false` and
+`slot.released = false` — three separate sites — changed no observable
+behaviour. The suite could not tell whether the field existed.
+
+**Cause:** `slot.released` was assigned `false` in four places and `true` in
+none. So `if (slot.released)` — the branch that answered `already-released` and
+counted double-release attempts — was unreachable, and the `already-released`
+reason in the public `ReleaseOutcome` union could never be returned. A second
+release of the same slot fell through to the `tenant === null` check and
+answered `not-held`.
+
+**Why it matters more than "dead code":** the request was refused either way,
+so no test failed and no invariant fired. But a reader reasoning about
+double-release would have concluded it was handled by that flag, and been wrong
+about how. A field that looks load-bearing while doing nothing is a claim the
+type-checker co-signs. No behavioural test can see it from outside; deleting a
+statement and watching nothing change is the only instrument that does.
+
+**Fix:** field, branch and reason all removed. A slot with no tenant is not
+held, which covers already-released, never-claimed and reclaimed-after-expiry
+alike — one observable state, one answer. `ReleaseOutcome.reason` is now
+`"stale-token" | "not-held"`, and the `Slot` definition in
+`src/policy/controlPlane.ts` carries a note saying why the field is absent, so
+it is not re-added as an obvious improvement.
+
+**Regression:** none for the dead field itself — that is what dead means.
+Double release as a _behaviour_ is covered by `test/mutants.test.ts` → _"M2:
+release runs twice on an error path"_ and `test/mutationGaps.test.ts` → _"a
+second release is detected"_.
+
+---
+
+## L5 · State that was written and never read
+
+**Found by:** the same mutation pass as L4, while `Slot` was being cleaned up.
+
+**Symptom:** `slot.runId` was assigned in five places — on admit, on release,
+on lease expiry, on completion and on cancel — and read in none. Every
+`delete:statement` mutant at one of those sites is equivalent to the original.
+
+**Cause:** run identity lives on `RunState` and in the decision log; the copy on
+the slot was carried along from an early draft and nothing was ever pointed at
+it.
+
+**Severity:** the lowest in this ledger. No behaviour depends on it. It is here
+because it is the same shape as L4 without even the misleading branch: state
+that exists only to be maintained, and a mutation score that would count each
+write as an "uncovered" site forever.
+
+**Fix:** removed, and recorded in the same `Slot` note as L4.
+
+**What the record does not show.** The survivor table committed with the fix
+(`docs/MUTATION.md` at `f2bcfc2`) was generated part-way through the change —
+it still lists the three `released = false` deletions but no `runId` site. So
+whether `runId` was first flagged by a listed survivor or by reading the struct
+while removing `released` is not recoverable from the history. The commit
+message attributes both to the same pass, and that attribution is the only
+record.
+
+**Regression:** none — dead state has no observable behaviour to assert.
+
+---
+
+## L6 · Every duplicate completion answered `replayId: 0`
+
+**Found by:** the same mutation pass. Flipping the comparison inside the
+duplicate-completion lookup changed nothing — the signature of code whose result
+is never used, or always the same.
+
+**Symptom:** a duplicate `complete` — the at-least-once case SEMANTICS E7 exists
+for — was acknowledged with `ok: true, duplicate: true` and `replayId: 0`.
+Replay ids start at 1; position 0 is never assigned.
+
+**Cause:** the lookup ran through `findRunForId`, a private helper that
+unconditionally returned `undefined`, so the `.find(...)` over the log's
+assigned ids never matched and `existing ?? 0` always fell through to 0. The
+endpoint answered `ok: true`, so nothing looked wrong.
+
+**Why it is the observable one of the three:** the point of handing out a replay
+id is that the caller can correlate an acknowledgement to a log position and
+resubscribe from it. A duplicate ack carrying a position that does not exist is
+worse than an error — it is a wrong answer delivered with a success code. The
+first `complete` was tested; the second was tested for `duplicate: true` and for
+not re-applying the effect (I8). Nobody had asserted which id the duplicate
+carried.
+
+**Fix:** `RunState` now stores the `replayId` assigned at completion, and a
+duplicate echoes it. The helper is gone.
+
+**Regression:** `test/mutationGaps.test.ts` → _"kills the duplicate-completion
+replayId mutant — duplicates echo the ORIGINAL id"_, which asserts the
+duplicate's id equals the first ack's and that the first is greater than zero.
+
+---
+
 ## L7 · The harness could not tell success from catastrophe
 
 **Found by:** running `scripts/mutate.mjs` while the suite was red.
