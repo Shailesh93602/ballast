@@ -31,9 +31,12 @@ found by the harness, that nobody planted. Planted mutants live in
 
 Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
 
-Three of the eight were in the **checker or the harness**, not the system under test. That ratio is
+Four of the nine were in the **checker, the reference oracle or the harness**, not the system under
+test — L1 (the checker), L3 (the reference oracle), L7 and L9 (the mutation harness). That ratio is
 the most useful thing this project taught: every layer that grades another needs someone grading it,
 and eventually that someone is you asking what the output would look like if the tool were wrong.
+Both numbers are counted from the table in `LEDGER.md` by a test, so this sentence cannot drift
+from it again.
 
 **L2 is the one worth reading.** The two engines were built from the same
 specification but not the same assumption, so they **disagreed instead of being
@@ -174,7 +177,7 @@ file for each one and fails if the run does not reproduce it.
 
 - **1,000 seeds** byte-identical, in-process and across a fresh process, against
   the built artifact
-- **197 tests**
+- **202 tests**
 - **95.8% mutation score** over `src/policy` (158 of 165 mechanical mutants killed)
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event
