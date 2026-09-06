@@ -20,6 +20,11 @@ jobs:
       # The exact gate, whole-repo, never per-file. Running a subset is how a
       # broken script reaches main.
       - run: npm run lint
+      # Refuses a credential-bearing filename, and refuses an ignore rule that
+      # only exists on somebody's laptop. Cheap here; unrecoverable once a
+      # secret is pushed to a public repo, because refs/pull/* survives a
+      # history rewrite.
+      - run: npm run check:secrets
       - run: npm run type-check
       - run: npm run test
       - run: npm run build
