@@ -41,7 +41,7 @@ const SAFE_GITIGNORE = [
   "",
 ].join("\n");
 
-type Fixture = { dir: string; env: Record<string, string | undefined> };
+type Fixture = { dir: string; env: typeof process.env };
 
 function makeRepo(files: Record<string, string>): Fixture {
   const dir = mkdtempSync(path.join(tmpdir(), "secretguard-"));
@@ -126,7 +126,7 @@ describe("check-no-secret-files", () => {
     writeFileSync(path.join(repo.dir, ".git/info/exclude"), ".env\n");
     const { code, out } = run(repo);
     expect(code).toBe(1);
-    expect(out).toMatch(/no committed ignore rule covers it.*\.env/s);
+    expect(out).toMatch(/no committed ignore rule covers it[\s\S]*\.env/);
   });
 
   it("does not object to a committed .env.example", () => {
