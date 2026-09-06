@@ -3,3 +3,25 @@ dist/
 coverage/
 *.log
 .DS_Store
+
+# Secrets
+#
+# Enforced by scripts/check-no-secret-files.mjs, which asks git whether these
+# names are covered rather than trusting this file — and requires the answer to
+# come from a COMMITTED rule. A pattern living only in ~/.gitignore_global or in
+# .git/info/exclude protects one checkout and travels nowhere.
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+credentials.json
+serviceAccount*.json
+service-account*.json
