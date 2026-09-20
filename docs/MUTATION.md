@@ -17,12 +17,33 @@ for a correctness argument.
 
 ## Result
 
-- Mutants generated: **167**
-- Killed: **161**
-- Survived: **6**
-- **Mutation score: 96.4%**
+- Mutants generated: **362**
+- Killed: **338**
+- Survived: **24**
+- **Mutation score: 93.4%**
+
+### By scope
+
+Reported separately because they mean different things. A survivor in
+`src/policy` is a gap in the tests. A survivor in `src/oracle` is an oracle
+that can be wrong without any test noticing — which is this project's
+recurring failure, not a lesser version of it.
+
+| Scope | Killed | Total | Score |
+| --- | --- | --- | --- |
+| `src/core` | 70 | 77 | 90.9% |
+| `src/oracle` | 104 | 117 | 88.9% |
+| `src/policy` | 164 | 168 | 97.6% |
 
 3 further mutant(s) were generated but do not PARSE (deleting the first line of a multi-line statement), and are excluded rather than counted. A mutant killed by a syntax error measures nothing about the suite — the same class of error as L7.
+
+Every mutant reached a verdict: the graded suite either failed an assertion (killed) or passed (survived).
+
+## What the mutants are graded against
+
+15 of 21 test files. The rest import nothing from the mutated directories, directly or transitively, so they cannot observe a mutation — they exercise a shell script, the eslint perimeter and the Tier B Postgres arm. The set is computed by walking each test file's imports, not listed by hand, and `test/mutation.test.ts` asserts the walk is sound.
+
+Not graded against: `test/checkNoSecretFiles.test.ts`, `test/determinismPerimeter.test.ts`, `test/flashSaleReal.test.ts`, `test/mutation.test.ts`, `test/semantics.test.ts`, `test/tierbSafety.test.ts`.
 
 ## Operators
 
@@ -45,20 +66,38 @@ A survivor is not automatically a bug. Triage each into:
 
 | File:line | Operator | Original | Triage |
 | --- | --- | --- | --- |
-| `src/policy/controlPlane.ts:349` | `offbyone:+1` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation cannot happen: release nulls the tenant, so a repeat is refused not-held, and a re-admit resets the generation counter to 0. The counter and I5 are defensive depth against a future change to release() itself. |
-| `src/policy/controlPlane.ts:486` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
-| `src/policy/controlPlane.ts:112` | `delete:statement` | `this.creditsSpent.set(t.id, 0);` | EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and rollWindowIfNeeded re-seeds the map on the first boundary; a missing constructor entry is indistinguishable from an explicit 0. |
-| `src/policy/controlPlane.ts:349` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
-| `src/policy/controlPlane.ts:421` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
-| `src/policy/replayLog.ts:133` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
+| `src/policy/controlPlane.ts:393` | `offbyone:+1` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation cannot happen: release nulls the tenant, so a repeat is refused not-held, and a re-admit resets the generation counter to 0. The counter and I5 are defensive depth against a future change to release() itself. |
+| `src/policy/controlPlane.ts:393` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
+| `src/policy/controlPlane.ts:465` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
+| `src/policy/replayLog.ts:163` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
+| `src/oracle/invariants.ts:232` | `offbyone:+1` | `detail: `slot ${r.slotId} was released ${r.priorReleasesOfGeneration + 1} times in one gen` | **UNTRIAGED — write a test** |
+| `src/oracle/invariants.ts:252` | `cmp:<=-><` | `if (s.ticksSinceQuiesce <= s.livenessBoundN) return [];` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:345` | `cmp:===->!==` | `return world.status.get(ev.runId) === "held"` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:350` | `cmp:===->!==` | `if (st === "completed")` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:350` | `bool:negate-if` | `if (st === "completed")` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:352` | `cmp:===->!==` | `if (st === "held") return { kind: "completed", runId: ev.runId, duplicate: false };` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:352` | `bool:negate-if` | `if (st === "held") return { kind: "completed", runId: ev.runId, duplicate: false };` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:357` | `cmp:===->!==` | `if (st === "completed") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:357` | `bool:negate-if` | `if (st === "completed") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:358` | `cmp:===->!==` | `if (st === "cancelled") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
+| `src/oracle/reference.ts:358` | `bool:negate-if` | `if (st === "cancelled") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
+| `src/oracle/shrink.ts:92` | `offbyone:-1` | `granularity = Math.max(granularity - 1, 2);` | **UNTRIAGED — write a test** |
+| `src/oracle/shrink.ts:92` | `delete:statement` | `granularity = Math.max(granularity - 1, 2);` | **UNTRIAGED — write a test** |
+| `src/core/clock.ts:39` | `cmp:===->!==` | `return this.heap.length === 0;` | **UNTRIAGED — write a test** |
+| `src/core/order.ts:68` | `cmp:!==->===` | `if (d !== 0) return d;` | **UNTRIAGED — write a test** |
+| `src/core/order.ts:68` | `bool:negate-if` | `if (d !== 0) return d;` | **UNTRIAGED — write a test** |
+| `src/core/rng.ts:97` | `cmp:>=->>` | `while (draw >= limit) draw = this.next64();` | **UNTRIAGED — write a test** |
+| `src/core/rng.ts:103` | `cmp:<=-><` | `if (p <= 0) return false;` | **UNTRIAGED — write a test** |
+| `src/core/rng.ts:104` | `cmp:>=->>` | `if (p >= 1) return true;` | **UNTRIAGED — write a test** |
+| `src/core/rng.ts:124` | `offbyone:-1` | `return weights.length - 1;` | **UNTRIAGED — write a test** |
 
-*Generated over 5 source files in `src/policy`.*
+*Generated over 14 source files in `src/policy`, `src/oracle`, `src/core`.*
 
-`src/sim`, `src/cli` and `src/tierb` are NOT mutated, and the reason is stated
-rather than left as a footnote: `src/sim` is driven by
-`test/faultInjection.test.ts` through a seeded fault schedule, so a mutant there
-changes which faults are injected rather than whether the system survives them —
-it would be scored against a different workload, which measures nothing.
-`src/cli` and `src/tierb` are I/O shells whose behaviour is asserted by
-process-level tests that this harness cannot attribute. Both are gaps; naming
-them is the point.
+`src/sim`, `src/cli`, `src/tierb` are NOT mutated, and the reason is
+stated rather than left as a footnote: `src/sim` is driven by
+`test/faultInjection.test.ts` through a seeded fault schedule, so a mutant
+there changes which faults are injected rather than whether the system
+survives them — it would be scored against a different workload, which
+measures nothing. `src/cli` and `src/tierb` are I/O shells whose behaviour
+is asserted by process-level tests that this harness cannot attribute.
+Both are gaps; naming them is the point.

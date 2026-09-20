@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { ControlPlane } from "../src/policy/controlPlane.js";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
-import { referenceDecision, type RefEvent } from "../src/oracle/reference.js";
+import {
+  referenceDecision,
+  type RefDecision,
+  type RefEvent,
+} from "../src/oracle/reference.js";
 import { Rng } from "../src/core/rng.js";
 import { checkAll } from "../src/oracle/invariants.js";
 import { DrivenPlane } from "./support/planeHarness.js";
@@ -55,6 +59,32 @@ function makeHistory(seed: number, length: number): RefEvent[] {
     }
   }
   return events;
+}
+
+/**
+ * Render a reference decision in the implementation's vocabulary.
+ *
+ * The two engines emit different SHAPES — a tagged union against a string — so
+ * something has to map one onto the other. Doing it here, in the test, rather
+ * than making either engine speak the other's language is deliberate: neither
+ * side gets to quietly adopt the other's representation, which is the step that
+ * would turn a differential into a comparison of one implementation with itself.
+ */
+function renderRef(d: RefDecision, runId: string): string {
+  switch (d.kind) {
+    case "admitted":
+      return `admitted:${runId}`;
+    case "rejected":
+      return `rejected:${runId}:${d.reason}`;
+    case "released":
+      return `released:${runId}`;
+    case "completed":
+      return `completed:${runId}:${d.duplicate}`;
+    case "cancelled":
+      return `cancelled:${runId}`;
+    case "noop":
+      return `noop:${runId}`;
+  }
 }
 
 /** Run a history through the real control plane, recording its decisions. */
@@ -201,7 +231,7 @@ describe("invariants hold across a randomized corpus", () => {
 });
 
 describe("differential: implementation vs reference", () => {
-  it("agrees on the admit/reject decision sequence across 300 histories", () => {
+  it("agrees on EVERY decision across 300 histories, not just the admits", () => {
     const divergences: Array<{ seed: number; index: number; impl: string; ref: string }> =
       [];
 
@@ -213,24 +243,28 @@ describe("differential: implementation vs reference", () => {
         const refDecision = referenceDecision(DEFAULT_CONTROL_PLANE, history, i);
         const implDecision = impl[i] as string;
 
-        // Compare only the ADMIT decisions: those are the ones both engines
-        // compute independently from the same predicate. Release/complete
-        // bookkeeping differs in representation between the two, and forcing
-        // agreement on representation rather than on decision would be
-        // comparing implementations, not behaviour.
-        if (history[i]!.kind !== "admit") continue;
-
-        const implAdmitted = implDecision.startsWith("admitted:");
-        const refAdmitted = refDecision.kind === "admitted";
+        // ALL FOUR DECISION KINDS, not just admits.
+        //
+        // This used to read `if (history[i]!.kind !== "admit") continue;`, on
+        // the argument that "release/complete bookkeeping differs in
+        // representation between the two, and forcing agreement on
+        // representation rather than on decision would be comparing
+        // implementations, not behaviour". The representations turned out to be
+        // identical; what the skip actually bought was that **three of the
+        // reference's four decision paths were graded by nothing**, which is
+        // how it went unnoticed that the reference believed 397 releases
+        // succeeded that the implementation refused.
+        //
+        // It was found by mutation, once `src/oracle` was in scope: nine
+        // mutants inside `referenceDecision`'s release/complete/cancel branches
+        // survived, because no assertion ever looked at their output (L28).
+        const refRendered = renderRef(refDecision, history[i]!.runId);
         // The REASON is compared too, not just the admitted/rejected bit.
         // SEMANTICS B5 makes the reasons distinguishable on purpose — "you are
         // over your limit" and "the system is full" are opposite operator
         // actions — so a differential that stops at the bit leaves the whole
         // RejectReason union, which both engines derive independently, unchecked.
-        const refRendered = refAdmitted
-          ? `admitted:${history[i]!.runId}`
-          : `rejected:${history[i]!.runId}:${"reason" in refDecision ? refDecision.reason : "?"}`;
-        if (implAdmitted !== refAdmitted || implDecision !== refRendered) {
+        if (implDecision !== refRendered) {
           divergences.push({
             seed,
             index: i,

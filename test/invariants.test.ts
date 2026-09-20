@@ -128,7 +128,7 @@ describe("invariant checker — every invariant must be able to FAIL", () => {
     expect(checkAll(s).map((x) => x.invariant)).toContain("I4");
   });
 
-  it("I5 catches a release ACCEPTED twice in one generation", () => {
+  it("I5 catches a release ACCEPTED twice in one generation, and says how many", () => {
     const s = {
       ...healthy(),
       acceptedReleases: [
@@ -140,7 +140,15 @@ describe("invariant checker — every invariant must be able to FAIL", () => {
         },
       ],
     };
-    expect(checkAll(s).map((x) => x.invariant)).toContain("I5");
+    const found = checkAll(s);
+    expect(found.map((x) => x.invariant)).toContain("I5");
+    // The COUNT in the message, not just the fact of a violation. One prior
+    // release plus this one is two, and an operator reading "released 1 times"
+    // would go looking for a different bug. A detail string nothing asserts is
+    // a detail string that drifts.
+    expect(found.find((v) => v.invariant === "I5")?.detail).toContain(
+      "released 2 times in one generation",
+    );
   });
 
   it("I5 catches a release ACCEPTED with a stale fencing token", () => {
@@ -224,9 +232,35 @@ describe("invariant checker — every invariant must be able to FAIL", () => {
     expect(checkAll(s).map((x) => x.invariant)).toContain("I6");
   });
 
-  it("I6 stays silent while still within the bound", () => {
-    const s = { ...healthy(), quiesced: true, ticksSinceQuiesce: 49, livenessBoundN: 50 };
-    expect(checkAll(s).map((x) => x.invariant)).not.toContain("I6");
+  it("I6 stays silent while still within the bound, INCLUDING exactly at it", () => {
+    const inside = {
+      ...healthy(),
+      quiesced: true,
+      ticksSinceQuiesce: 49,
+      livenessBoundN: 50,
+    };
+    expect(checkAll(inside).map((x) => x.invariant)).not.toContain("I6");
+
+    // Exactly AT the bound is inside it. Without this the boundary is invisible:
+    // `<=` and `<` differ on one value, and the calibration in
+    // quiescence.test.ts puts the observed max right against it — so an
+    // off-by-one here would fire on a healthy drain and be "fixed" by widening
+    // N, which is how a calibrated bound quietly becomes a generous one.
+    const exactly = {
+      ...healthy(),
+      quiesced: true,
+      ticksSinceQuiesce: 50,
+      livenessBoundN: 50,
+    };
+    expect(checkAll(exactly).map((x) => x.invariant)).not.toContain("I6");
+
+    const past = {
+      ...healthy(),
+      quiesced: true,
+      ticksSinceQuiesce: 51,
+      livenessBoundN: 50,
+    };
+    expect(checkAll(past).map((x) => x.invariant)).toContain("I6");
   });
 
   it("I6 stays silent once everything has drained", () => {

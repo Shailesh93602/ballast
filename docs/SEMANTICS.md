@@ -375,8 +375,12 @@ that it had been.
 another ordering dimension the seed must control. Lazy reclamation keeps the
 system single-decision-maker, which is what makes the reference model tractable.
 **Known cost:** a slot can sit expired-but-unreclaimed while nobody is asking for
-capacity. This is invisible externally and is accepted.
-**Guards** I3, I6. **Status: `DECIDED`**
+capacity. ~~This is invisible externally~~ — **that claim was wrong, and C8
+replaces it.** The window is externally visible: a `release` arriving inside it
+succeeds, because the slot still carries the holder's token. The cost is
+accepted; the description of it was not accurate.
+**Guards** I3, I6. **Status: `DECIDED`** — _`Known cost` corrected after the
+audit; see C8 and the Amendments._
 
 ### C6 · A run whose lease expired is later completed or cancelled. Does that free the slot it used to hold?
 
@@ -414,6 +418,35 @@ general form, which is the useful one: **any code that resolves a stored
 it.** See LEDGER L22.
 
 **Guards** I1, I3, I5. **Status: `DECIDED`** — _added after the audit; see
+Amendments._
+
+### C8 · A lease has expired but nothing has reclaimed the slot. Can the holder still release it?
+
+**→ Yes.** Until something sweeps, the slot is still held by that claim, and its
+holder may release it. Expiry becomes effective on RECLAMATION, not at the
+instant the lease runs out.
+
+**Else, checking the lease inside `release()`** — making expiry instantaneous —
+gives two different answers to "when did this lease end" depending on which
+operation asks. Admission would see a slot reclaimed at the moment an admit
+sweeps (C5), and release would see it gone earlier. A lease with two expiry
+times is worse than either rule on its own.
+
+**The consequence for the reference model is the interesting part.** The
+implementation reclaims only at the top of `admit`, so "has this run's slot been
+swept" depends on whether any admit has arrived since the lease ran out — a
+question about the event history, not about the run. A model that treats expiry
+as a function of the clock alone disagrees with the implementation on exactly
+the events that fall in the window, and this one did: **397 releases the
+reference believed succeeded and the implementation refused, and 40 the other
+way once expiry was made instantaneous.** Both directions were invisible for as
+long as the differential compared only ADMIT decisions.
+
+**Found by extending mutation to `src/oracle`** — nine mutants inside
+`referenceDecision`'s release, complete and cancel branches survived, because no
+assertion ever looked at their output. See LEDGER L28.
+
+**Guards** I3, I5. **Status: `DECIDED`** — _added after the audit; see
 Amendments._
 
 ---
@@ -570,7 +603,7 @@ behaviour, because a subscriber narrowing its own window is exactly the
 backpressure signal the mechanism exists to carry.
 
 **What had to be checked rather than assumed** is that the pause is
-*recoverable*. It is: the entries counted in `inFlight` have already been
+_recoverable_. It is: the entries counted in `inFlight` have already been
 delivered, so the subscriber can always acknowledge them, and each ack lowers
 `inFlight`. There is no state in which the subscriber needs credit in order to
 earn credit.
@@ -708,18 +741,19 @@ still `DRAFT`, so editing has been legal; the log below exists so that the
 edits are visible without reading `git log -p`, which is the only reason the
 rule was written.
 
-| Date       | Row    | What changed                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2026-08-16 | **B6** | Added — completion is terminal and frees capacity. Written **after** `src/policy/` existed, in commit `2bc4055` (M4), in response to the differential catching the gap (L2). It was inserted into section B rather than logged here, so the file read as if all 37 original rows were pre-implementation. They were: `3dc64c8` (SEMANTICS.md) is an ancestor of `c9ebbd5` (the control plane). B6 is the one row that is not, and it now says so here. |
-| 2026-09-20 | **C4** | Corrected — the row asserted that lease renewal "exists". There is no `renew` operation. The recommendation stands; the claim that it was implemented did not.                                                                                                                                                                                                                                                                                         |
-| 2026-09-20 | **C6** | Added — the fencing token applies to every path that frees a slot, not only `release()`. Resolved silently and wrongly until the audit (L10).                                                                                                                                                                                                                                                                                                          |
-| 2026-09-20 | **A8** | Added — I4's "expected" side is scoped to the current window (L11, L12, L13).                                                                                                                                                                                                                                                                                                                                                                          |
-| 2026-09-20 | **A9** | Added — admission is idempotent per `runId`, and a completed id is not re-admissible. Found by connecting the fault injector to the control plane, which immediately fired I4 (L20, L21).                                                                                                                                                                                                                                                              |
-| 2026-09-20 | **F3** | Corrected — the calibration this row requires does not exist; `livenessBoundN` is hardcoded and the corpus never quiesces, so I6 is the vacuous invariant F3's own `Else` clause warns about. Open work, not a fix.                                                                                                                                                                                                                                 |
-| 2026-09-20 | **B7** | Added — precedence among simultaneous refusals. Neither document nor test fixed it, so both engines derived it from the same unwritten decision and already disagreed on one request no corpus can generate (L23).                                                                                                                                                                                                                                      |
+| Date       | Row     | What changed                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-08-16 | **B6**  | Added — completion is terminal and frees capacity. Written **after** `src/policy/` existed, in commit `2bc4055` (M4), in response to the differential catching the gap (L2). It was inserted into section B rather than logged here, so the file read as if all 37 original rows were pre-implementation. They were: `3dc64c8` (SEMANTICS.md) is an ancestor of `c9ebbd5` (the control plane). B6 is the one row that is not, and it now says so here. |
+| 2026-09-20 | **C4**  | Corrected — the row asserted that lease renewal "exists". There is no `renew` operation. The recommendation stands; the claim that it was implemented did not.                                                                                                                                                                                                                                                                                         |
+| 2026-09-20 | **C6**  | Added — the fencing token applies to every path that frees a slot, not only `release()`. Resolved silently and wrongly until the audit (L10).                                                                                                                                                                                                                                                                                                          |
+| 2026-09-20 | **A8**  | Added — I4's "expected" side is scoped to the current window (L11, L12, L13).                                                                                                                                                                                                                                                                                                                                                                          |
+| 2026-09-20 | **A9**  | Added — admission is idempotent per `runId`, and a completed id is not re-admissible. Found by connecting the fault injector to the control plane, which immediately fired I4 (L20, L21).                                                                                                                                                                                                                                                              |
+| 2026-09-20 | **F3**  | Corrected — the calibration this row requires does not exist; `livenessBoundN` is hardcoded and the corpus never quiesces, so I6 is the vacuous invariant F3's own `Else` clause warns about. Open work, not a fix.                                                                                                                                                                                                                                    |
+| 2026-09-20 | **B7**  | Added — precedence among simultaneous refusals. Neither document nor test fixed it, so both engines derived it from the same unwritten decision and already disagreed on one request no corpus can generate (L23).                                                                                                                                                                                                                                     |
 | 2026-09-20 | **A10** | Added — a released or expired identity is re-admissible as a FRESH claim. A9's "still live" was implemented as an existence check that was always true (L22).                                                                                                                                                                                                                                                                                          |
 | 2026-09-20 | **A11** | Added — the credit ledger is a function of virtual time, not of traffic. The window rolled only inside `admit`, so the counter described the epoch of the last admission (L25).                                                                                                                                                                                                                                                                        |
-| 2026-09-20 | **C7** | Added — the path that GRANTS a slot validates the fencing token, not only the three that free one. C6 was written and then under-applied (L22).                                                                                                                                                                                                                                                                                                        |
-| 2026-09-20 | **E9** | Added — a subscriber's credit grant is a request, bounded by the publisher. `acknowledge` assigned it straight through, so flow control constrained only the subscribers that chose to be constrained.                                                                                                                                                                                                                                                  |
+| 2026-09-20 | **C7**  | Added — the path that GRANTS a slot validates the fencing token, not only the three that free one. C6 was written and then under-applied (L22).                                                                                                                                                                                                                                                                                                        |
+| 2026-09-20 | **E9**  | Added — a subscriber's credit grant is a request, bounded by the publisher. `acknowledge` assigned it straight through, so flow control constrained only the subscribers that chose to be constrained.                                                                                                                                                                                                                                                 |
 | 2026-09-20 | **E10** | Added — an acknowledgement granting fewer credits than are in flight pauses, legitimately and recoverably. Previously undocumented behaviour, now pinned.                                                                                                                                                                                                                                                                                              |
-| 2026-09-20 | **F3** | Implemented — N is calibrated at 50 from a 200-seed quiescence corpus whose longest drain is 40 ticks, asserted from both sides. The row had said this was required since it was written.                                                                                                                                                                                                                                    |
+| 2026-09-20 | **C8**  | Added, and C5's `Known cost` corrected with it — the expired-but-unreclaimed window is NOT externally invisible; a release inside it succeeds. Found by extending mutation to `src/oracle` (L28).                                                                                                                                                                                                                                                      |
+| 2026-09-20 | **F3**  | Implemented — N is calibrated at 50 from a 200-seed quiescence corpus whose longest drain is 40 ticks, asserted from both sides. The row had said this was required since it was written.                                                                                                                                                                                                                                                              |

@@ -84,6 +84,19 @@ export interface World {
   readonly tenantOf: Map<string, TenantId>;
   readonly claimedAt: Map<string, number>;
   readonly claims: Claim[];
+  /**
+   * The virtual time of the most recent admit — i.e. the last moment anything
+   * SWEPT the pool.
+   *
+   * SEMANTICS C5 makes reclamation lazy: there is no sweeper, and an expired
+   * lease is reclaimed by the next claimant. So there is a window in which a
+   * lease has expired and the slot is still held, and C5 called that window
+   * "invisible externally". It is not: a `release` arriving inside it succeeds,
+   * because the slot still carries the holder's token. Modelling expiry as
+   * instantaneous made the reference refuse 40 releases the implementation
+   * accepted (LEDGER L28).
+   */
+  lastSweep: number;
 }
 
 export function emptyWorld(): World {
@@ -92,6 +105,7 @@ export function emptyWorld(): World {
     tenantOf: new Map(),
     claimedAt: new Map(),
     claims: [],
+    lastSweep: 0,
   };
 }
 
@@ -107,6 +121,28 @@ const windowOf = (t: number, config: ControlPlaneConfig): number =>
  * slot is already free. The two notions of "live" have to agree or the
  * differential reports a divergence that is really a definition mismatch.
  */
+/**
+ * Does this run still physically hold its slot?
+ *
+ * NOT the same question as `isLive`, and the difference is SEMANTICS C5. A
+ * claim can be past its lease and still hold the slot, because nothing has come
+ * along to reclaim it — reclamation happens at the top of `admit` and nowhere
+ * else. `isLive` answers "may this claim still be treated as current", which is
+ * what the ADMIT path asks after it has just swept. This answers "is the slot
+ * still occupied by it", which is what RELEASE asks, because release does not
+ * sweep.
+ *
+ * Collapsing the two is what made the reference disagree with the
+ * implementation on 40 of 15,502 non-admit decisions — and nothing noticed for
+ * as long as the differential compared only admits (LEDGER L28).
+ */
+function stillHolds(world: World, runId: string, config: ControlPlaneConfig) {
+  if (world.status.get(runId) !== "held") return false;
+  const at = world.claimedAt.get(runId);
+  if (at === undefined) return false;
+  return at + config.leaseTicks > world.lastSweep;
+}
+
 function isLive(world: World, runId: string, now: number, config: ControlPlaneConfig) {
   if (world.status.get(runId) !== "held") return false;
   const at = world.claimedAt.get(runId);
@@ -135,6 +171,9 @@ function isLive(world: World, runId: string, now: number, config: ControlPlaneCo
 export function applyEvent(config: ControlPlaneConfig, world: World, e: RefEvent): void {
   switch (e.kind) {
     case "admit": {
+      // Every admit reclaims expired leases before it does anything else, so
+      // an admit is the ONLY thing that sweeps the pool (SEMANTICS C5).
+      world.lastSweep = Math.max(world.lastSweep, e.vtime);
       // A duplicate of a LIVE claim changes nothing: same slot, same credit.
       if (isLive(world, e.runId, e.vtime, config)) break;
       if (refusalConditions(config, world, e.tenant, e.runId, e.vtime).length > 0) {
@@ -151,7 +190,13 @@ export function applyEvent(config: ControlPlaneConfig, world: World, e: RefEvent
       break;
     }
     case "release":
-      if (world.status.get(e.runId) === "held") world.status.set(e.runId, "released");
+      // LIVE, not merely "held". A claim whose lease has expired had its slot
+      // reclaimed (C5), so releasing it is refused by the fencing check exactly
+      // as `release()` refuses a stale token. The reference used to transition
+      // on the raw status and therefore believed 397 releases succeeded that
+      // the implementation refused — invisible for as long as the differential
+      // compared only ADMIT decisions (LEDGER L28).
+      if (stillHolds(world, e.runId, config)) world.status.set(e.runId, "released");
       break;
     case "complete":
       // SEMANTICS B6 — completion is terminal and frees the slot.
@@ -342,7 +387,7 @@ export function referenceDecision(
       };
     }
     case "release":
-      return world.status.get(ev.runId) === "held"
+      return stillHolds(world, ev.runId, config)
         ? { kind: "released", runId: ev.runId }
         : { kind: "noop", runId: ev.runId };
     case "complete": {

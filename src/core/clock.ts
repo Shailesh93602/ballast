@@ -35,9 +35,14 @@ export class EventQueue<E> {
     return this.heap.length;
   }
 
-  isEmpty(): boolean {
-    return this.heap.length === 0;
-  }
+  /**
+   * NOTE: there is deliberately no `isEmpty()`.
+   *
+   * It was exported and called from nowhere. Mechanical mutation over
+   * `src/core` is what pointed at it — flipping its comparison changed nothing
+   * any test could see, which is what an uncalled export looks like from the
+   * outside. `size` is what the simulation actually reads (LEDGER L29).
+   */
 
   /** Peek at the next event's time without removing it. */
   peekTime(): Ticks | undefined {
