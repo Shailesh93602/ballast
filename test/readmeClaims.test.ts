@@ -2,6 +2,12 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
+import {
+  FAIRNESS_SEEDS,
+  cappedStarvation,
+  cappedWorstDegradation,
+  fifoStarvation,
+} from "./support/fairnessHarness.js";
 
 /**
  * The README's numbers must be reproducible.
@@ -30,6 +36,14 @@ function testFiles(): string[] {
     .map((f) => readFileSync(join(root, "test", f), "utf8"));
 }
 
+/** Test sources INCLUDING shared harnesses, for checks about corpus sizes. */
+function allTestSources(): string[] {
+  const support = readdirSync(join(root, "test", "support"))
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => readFileSync(join(root, "test", "support", f), "utf8"));
+  return [...testFiles(), ...support];
+}
+
 /**
  * Count `it(` occurrences across the suite — the honest test count.
  *
@@ -39,6 +53,35 @@ function testFiles(): string[] {
  */
 function countTests(): number {
   return testFiles().reduce((n, src) => n + (src.match(/^\s+it\(/gm) ?? []).length, 0);
+}
+
+/**
+ * Test files where an `it(` sits inside a loop.
+ *
+ * `countTests` is a static regex over the source: one `it(` written inside a
+ * `for` over ten fixtures is one match and ten tests. The README would then
+ * under-report a growing suite while this file stayed green — the counter
+ * disagreeing with the thing it counts, which is the failure this whole file
+ * exists to prevent. Caught by writing exactly that loop.
+ */
+function filesWithLoopGeneratedTests(): string[] {
+  const names = readdirSync(join(root, "test")).filter((f) => f.endsWith(".test.ts"));
+  return names.filter((name) => {
+    const lines = readFileSync(join(root, "test", name), "utf8").split("\n");
+    return lines.some((line, i) => {
+      if (!/^\s*(for|while)\s*\(/.test(line)) return false;
+      const indent = /^\s*/.exec(line)?.[0].length ?? 0;
+      // An `it(` nested deeper than the loop header, before the loop closes.
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j] ?? "";
+        if (next.trim() === "") continue;
+        const nextIndent = /^\s*/.exec(next)?.[0].length ?? 0;
+        if (nextIndent <= indent) return false;
+        if (/^\s*it\(/.test(next)) return true;
+      }
+      return false;
+    });
+  });
 }
 
 describe("README numbers are reproducible", () => {
@@ -51,6 +94,14 @@ describe("README numbers are reproducible", () => {
       `README claims ${claimed} tests; the suite defines ${actual}. ` +
         `Update the README or delete the claim — do not loosen this test.`,
     ).toBe(actual);
+  });
+
+  it("no test is generated inside a loop, which would defeat that counter", () => {
+    expect(
+      filesWithLoopGeneratedTests(),
+      "a loop writes one `it(` and runs many, so the README's count would " +
+        "silently drift below the real suite size",
+    ).toEqual([]);
   });
 
   it("the quoted mutation score matches MUTATION.md", () => {
@@ -83,7 +134,7 @@ describe("README numbers are reproducible", () => {
   it("every corpus size named in the README appears in a test", () => {
     // Guards against a corpus being quietly shrunk to make CI faster while the
     // README keeps advertising the old, larger number.
-    const sources = testFiles().join("\n");
+    const sources = allTestSources().join("\n");
     const corpusClaims: Array<{ label: string; needle: RegExp }> = [
       { label: "1,000 determinism seeds", needle: /SEED_COUNT = 1000/ },
       { label: "2,000 invariant histories", needle: /seed <= 2000/ },
@@ -106,16 +157,67 @@ describe("README numbers are reproducible", () => {
     );
   });
 
-  it("the fairness figures match the fairness test", () => {
-    const src = readFileSync(join(root, "test", "fairness.test.ts"), "utf8");
-    // 1.000x isolation is asserted exactly.
-    expect(readme).toContain("**1.000×**");
-    expect(src, "the isolation claim must be an exact assertion").toMatch(
-      /\)\.toBe\(1\)/,
-    );
-    // The starvation figure must be a real count over 60 seeds.
-    expect(readme).toMatch(/\*\*38 of 60\*\*/);
-    expect(src).toMatch(/seed <= 60/);
+  /**
+   * THE STARVATION FIGURE IS COMPUTED, NOT MATCHED AGAINST A LITERAL.
+   *
+   * This block used to assert that README.md matched a regex containing the
+   * literal "38 of 60". The 38 existed in four places — README.md, twice in
+   * docs/FAIRNESS.md, and here
+   * — and was produced by none of them: `fairness.test.ts` only ever asserted
+   * `starvedSeeds > 0`. So the guard asserted that the README still said what
+   * the README said. Had the policy changed and the real number become 41,
+   * every one of the 209 tests would have stayed green while three documents
+   * quoted a figure no run reproduced.
+   *
+   * It is now run, and the pattern is BUILT FROM the result rather than
+   * written beside it — the same correction this workspace applied after
+   * `claims-consistency.test.ts` hardcoded the very number it existed to catch
+   * going stale.
+   */
+  describe("the fairness figures are produced by running the measurement", () => {
+    const fairnessDoc = readFileSync(join(root, "docs", "FAIRNESS.md"), "utf8");
+    const { starvedSeeds } = fifoStarvation();
+
+    it("the isolation claim is an exact assertion, not a tolerance", () => {
+      expect(readme).toContain("**1.000×**");
+      expect(cappedWorstDegradation(), "per-tenant caps must cost exactly nothing").toBe(
+        1,
+      );
+    });
+
+    it("README's starvation count is the count the run produces", () => {
+      expect(
+        readme,
+        `the measured figure is ${starvedSeeds} of ${FAIRNESS_SEEDS}`,
+      ).toMatch(new RegExp(`\\*\\*${starvedSeeds} of ${FAIRNESS_SEEDS}\\*\\* seeds`));
+    });
+
+    it("docs/FAIRNESS.md quotes the same measured count — in both places", () => {
+      // FAIRNESS.md was checked by nothing at all; it states the figure twice,
+      // in a table and in prose, and both are asserted here.
+      expect(fairnessDoc, "the results table").toMatch(
+        new RegExp(`\\*\\*${starvedSeeds} / ${FAIRNESS_SEEDS}\\*\\*`),
+      );
+      expect(fairnessDoc, "the prose restatement").toMatch(
+        new RegExp(`${starvedSeeds} of\\s*\\n?${FAIRNESS_SEEDS}\\s*seeds`),
+      );
+    });
+
+    it(`no OTHER 'N of ${FAIRNESS_SEEDS}' figure is lying around the docs`, () => {
+      // The negative half, BUILT FROM the computed values rather than written
+      // beside them — the precise mistake that let a stale 202 sit green for
+      // four days in this workspace. Both legitimate counts are run: the FIFO
+      // control arm's, and the capped policy's (structurally zero).
+      const legitimate = new Set([String(starvedSeeds), String(cappedStarvation())]);
+      const stale = [
+        ...(readme + "\n" + fairnessDoc).matchAll(
+          new RegExp(`\\b(\\d+)\\s*(?:of|/)\\s*${FAIRNESS_SEEDS}\\b`, "g"),
+        ),
+      ]
+        .map((m) => m[0])
+        .filter((m) => !legitimate.has(/^\d+/.exec(m)?.[0] ?? ""));
+      expect(stale, "a starvation figure that no run produces").toEqual([]);
+    });
   });
 
   describe("the findings sentence is counted from LEDGER.md, not remembered", () => {
@@ -138,24 +240,52 @@ describe("README numbers are reproducible", () => {
       /checker|reference|harness/i.test(r.severity),
     );
 
-    const WORDS: Record<string, number> = {
-      one: 1,
-      two: 2,
-      three: 3,
-      four: 4,
-      five: 5,
-      six: 6,
-      seven: 7,
-      eight: 8,
-      nine: 9,
-      ten: 10,
-      eleven: 11,
-      twelve: 12,
+    // Spelled out up to thirty. The list used to stop at twelve, so the moment
+    // the ledger grew past it this check read NaN — fail-loud, but for the
+    // wrong reason, which costs the next reader the same ten minutes.
+    const WORDS: readonly string[] = [
+      "zero",
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+      "twenty",
+      "twenty-one",
+      "twenty-two",
+      "twenty-three",
+      "twenty-four",
+      "twenty-five",
+      "twenty-six",
+      "twenty-seven",
+      "twenty-eight",
+      "twenty-nine",
+      "thirty",
+    ];
+    const toNumber = (w: string): number => {
+      const idx = WORDS.indexOf(w.toLowerCase());
+      return idx >= 0 ? idx : Number(w);
     };
-    const toNumber = (w: string): number => WORDS[w.toLowerCase()] ?? Number(w);
 
+    // `[\w-]+`, not `\w+`: the count crossed twenty and became "twenty-one",
+    // which `\w` cannot span. The guard then matched nothing and reported
+    // `expected null not to be null` — fail-loud, but naming the wrong thing.
     const sentence =
-      /(\w+) of the (\w+) were in the \*\*checker, the reference oracle or the harness\*\*[^.]*\./.exec(
+      /([\w-]+) of the ([\w-]+) were in the \*\*checker, the reference oracle or the harness\*\*[^.]*\./.exec(
         readme,
       );
 

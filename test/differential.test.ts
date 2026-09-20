@@ -100,6 +100,25 @@ function runImplementation(history: readonly RefEvent[]): string[] {
   return decisions;
 }
 
+/**
+ * The length every generated history runs to.
+ *
+ * It is a named constant because the corpus has to REACH the regimes it claims
+ * to cover, and two of them sat just outside the old length of 40:
+ *
+ *   - a tumbling-window boundary at `windowTicks` = 100. The longest of the
+ *     2,000 histories reached tick 85, so **zero** of them ever rolled a
+ *     window — the exact outcome SEMANTICS A2 names as the thing to avoid
+ *     ("too large and the corpus never observes a window boundary, leaving
+ *     A1's burst behaviour untested").
+ *   - a lease expiring (40 ticks) and the slot being RE-CLAIMED by another
+ *     tenant, which is the only state in which a stale claimant exists at all.
+ *
+ * `corpusReach` below asserts both are actually hit, so shortening this back
+ * to make CI faster fails loudly instead of silently emptying the corpus.
+ */
+const HISTORY_LENGTH = 120;
+
 function stateOf(plane: ControlPlane, vtime: number): CheckableState {
   const c = plane.counters;
   return {
@@ -111,7 +130,11 @@ function stateOf(plane: ControlPlane, vtime: number): CheckableState {
     claimsGranted: c.claimsGranted,
     releasesDone: c.releasesDone,
     creditsSpent: plane.creditsSpentMap(),
-    creditsExpected: plane.creditsSpentMap(),
+    // NOT `creditsSpentMap()` again. It used to be, on both sides — so I4
+    // compared a map to ITSELF for every event of every seed and was
+    // structurally incapable of firing. `creditsExpected()` is the independent
+    // recomputation the CheckableState field has always advertised.
+    creditsExpected: plane.creditsExpected(),
     slotOwnerToken: new Map(),
     acceptedReleases: c.acceptedReleases,
     replayIds: plane.log.assignedIds(),
@@ -122,11 +145,65 @@ function stateOf(plane: ControlPlane, vtime: number): CheckableState {
   };
 }
 
+/**
+ * A corpus is worth what it REACHES, not what it runs.
+ *
+ * Both numbers below were zero-or-near-zero at the old history length while
+ * every test stayed green, which is the same failure as a fault injector that
+ * injects nothing (KG2): the suite reports coverage of a regime it never
+ * entered.
+ */
+describe("the corpus reaches the regimes it claims to cover", () => {
+  it("crosses a tumbling-window boundary on a meaningful share of seeds", () => {
+    let crossed = 0;
+    for (let seed = 1; seed <= 2000; seed++) {
+      const history = makeHistory(seed, HISTORY_LENGTH);
+      const last = history[history.length - 1];
+      if (last !== undefined && last.vtime >= DEFAULT_CONTROL_PLANE.windowTicks) {
+        crossed++;
+      }
+    }
+    expect(
+      crossed,
+      `only ${crossed}/2000 histories reach tick ${DEFAULT_CONTROL_PLANE.windowTicks}; ` +
+        `SEMANTICS A1's tumbling-window behaviour is untested below that`,
+    ).toBeGreaterThan(1000);
+  });
+
+  it("produces a stale claimant — an expired lease whose slot is re-claimed", () => {
+    // The precondition for the whole fencing-token argument. If no history ever
+    // reaches it, I5 and SEMANTICS C1/C4 are being asserted against a state the
+    // corpus cannot construct.
+    let seedsWithReassignment = 0;
+    for (let seed = 1; seed <= 2000; seed++) {
+      const history = makeHistory(seed, HISTORY_LENGTH);
+      const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
+      const tokenOf = new Map<string, { slotId: string; token: number }>();
+      let sawReassignment = false;
+      for (const ev of history) {
+        if (ev.kind !== "admit") continue;
+        const r = plane.admit(ev.vtime, ev.tenant, ev.runId);
+        if (!r.ok) continue;
+        for (const [, held] of tokenOf) {
+          if (held.slotId === r.slotId && held.token !== r.token) sawReassignment = true;
+        }
+        tokenOf.set(ev.runId, { slotId: r.slotId, token: r.token });
+      }
+      if (sawReassignment) seedsWithReassignment++;
+    }
+    expect(
+      seedsWithReassignment,
+      "no history ever hands a slot to a second claimant, so nothing in the " +
+        "corpus can exercise a stale token",
+    ).toBeGreaterThan(100);
+  });
+});
+
 describe("invariants hold across a randomized corpus", () => {
   it("no invariant is violated over 2,000 seeded histories", () => {
     const failures: Array<{ seed: number; detail: string }> = [];
     for (let seed = 1; seed <= 2000; seed++) {
-      const history = makeHistory(seed, 40);
+      const history = makeHistory(seed, HISTORY_LENGTH);
       const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
       const slotOf = new Map<string, { slotId: string; token: number }>();
 
@@ -162,7 +239,7 @@ describe("differential: implementation vs reference", () => {
       [];
 
     for (let seed = 1; seed <= 300; seed++) {
-      const history = makeHistory(seed, 30);
+      const history = makeHistory(seed, HISTORY_LENGTH);
       const impl = runImplementation(history);
 
       for (let i = 0; i < history.length; i++) {
@@ -178,7 +255,15 @@ describe("differential: implementation vs reference", () => {
 
         const implAdmitted = implDecision.startsWith("admitted:");
         const refAdmitted = refDecision.kind === "admitted";
-        if (implAdmitted !== refAdmitted) {
+        // The REASON is compared too, not just the admitted/rejected bit.
+        // SEMANTICS B5 makes the reasons distinguishable on purpose — "you are
+        // over your limit" and "the system is full" are opposite operator
+        // actions — so a differential that stops at the bit leaves the whole
+        // RejectReason union, which both engines derive independently, unchecked.
+        const refRendered = refAdmitted
+          ? `admitted:${history[i]!.runId}`
+          : `rejected:${history[i]!.runId}:${"reason" in refDecision ? refDecision.reason : "?"}`;
+        if (implAdmitted !== refAdmitted || implDecision !== refRendered) {
           divergences.push({
             seed,
             index: i,

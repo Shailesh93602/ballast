@@ -7,6 +7,9 @@ import {
   REAL_STRATEGIES,
 } from "../src/tierb/flashSaleReal.js";
 import type { Pool } from "pg";
+// Imported rather than taken from a global: the determinism perimeter bans
+// ambient timers, and the ban list only whitelists a few globals by name.
+import { setTimeout as scheduleTimer } from "node:timers";
 
 /**
  * The flash sale against a REAL Postgres.
@@ -25,19 +28,48 @@ import type { Pool } from "pg";
 const URL =
   process.env["BALLAST_TIERB_URL"] ?? "postgresql://localhost:5432/khatago_ballast";
 
+/**
+ * Probe with a DEADLINE, not just a try/catch.
+ *
+ * The docstring above promises this suite skips rather than failing for
+ * environmental reasons — "a suite that fails for environmental reasons teaches
+ * people to ignore it". It did exactly that: this is a module-level `await`, so
+ * when the probe neither resolved nor rejected (a saturated local Postgres
+ * refusing new connections without erroring), the MODULE never finished
+ * loading, and all four tests reported as 5s timeouts instead of skipping.
+ *
+ * `catch` only covers a connection that fails. A connection that hangs needs a
+ * clock.
+ */
+const PROBE_TIMEOUT_MS = 3000;
+
 async function databaseAvailable(): Promise<Pool | null> {
+  let pool: Pool | undefined;
   try {
-    const pool = poolFor(URL);
-    await pool.query("SELECT 1");
+    pool = poolFor(URL);
+    const probe = pool.query("SELECT 1");
+    const timeout = new Promise<never>((_, reject) =>
+      scheduleTimer(
+        () => reject(new Error(`probe did not answer within ${PROBE_TIMEOUT_MS}ms`)),
+        PROBE_TIMEOUT_MS,
+      ).unref(),
+    );
+    await Promise.race([probe, timeout]);
     return pool;
   } catch {
+    // Release the half-open pool; leaving it dangling is what exhausts the
+    // server's connection slots for the next run.
+    await pool?.end().catch(() => undefined);
     return null;
   }
 }
 
 const pool = await databaseAvailable();
 if (!pool) {
-  console.warn(`[flashSaleReal] SKIPPED — no local Postgres at ${URL}`);
+  console.warn(
+    `[flashSaleReal] SKIPPED — no local Postgres answering within ` +
+      `${PROBE_TIMEOUT_MS}ms at ${URL}`,
+  );
 }
 
 const STOCK = 5;

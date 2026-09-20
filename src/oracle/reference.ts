@@ -71,16 +71,29 @@ export function referenceDecision(
   const tenantOf = new Map<string, TenantId>();
   const claimedAt = new Map<string, number>();
   /**
-   * Runs whose admit was ACCEPTED — i.e. that actually took a slot and
-   * therefore actually spent a credit.
+   * runId -> the window in which its credit was actually spent, for the runs
+   * whose admit was ACCEPTED. This is the credit ledger, recomputed.
    *
-   * This is deliberately NOT `status.has(runId)`. A cancel inserts a runId into
-   * `status` even for a run whose admit was rejected, so keying credit off the
-   * status map billed rejected-then-cancelled runs for credit they never spent.
-   * The differential caught it: the reference refused an admit with `no-credit`
-   * that the implementation correctly allowed.
+   * TWO CORRECTIONS ARE ENCODED HERE, both found by the differential.
+   *
+   * It is deliberately NOT keyed off `status.has(runId)`. A cancel inserts a
+   * runId into `status` even for a run whose admit was rejected, so keying
+   * credit off the status map billed rejected-then-cancelled runs for credit
+   * they never spent (L3).
+   *
+   * And it is keyed by RUN, not by admit EVENT. Delivery is at-least-once, so
+   * the same admit can arrive twice; walking the event list billed a retry a
+   * second time (SEMANTICS A9, L21). No corpus generated a duplicate runId, so
+   * the two definitions were indistinguishable until the fault injector was
+   * wired to the control plane.
+   *
+   * An earlier version kept a separate accepted-claims Set alongside this map.
+   * Once `countSpent` stopped walking the events, nothing read it — dead state
+   * of exactly the shape L5 recorded, so it is gone rather than left looking
+   * load-bearing.
    */
-  const actuallyClaimed = new Set<string>();
+  const claimWindowOf = new Map<string, number>();
+  const tenantClaimed = new Map<string, TenantId>();
 
   const windowOf = (t: number): number => Math.floor(t / config.windowTicks);
 
@@ -89,23 +102,26 @@ export function referenceDecision(
       case "admit": {
         // Was this admit accepted? Recompute the same predicate the same way.
         if (status.get(e.runId) === "cancelled") break;
+        if (status.get(e.runId) === "completed") break; // A9 — single-use id
+        // A duplicate of a live claim changes nothing: same slot, same credit.
+        if (status.get(e.runId) === "held") break;
         const held = countHeld(status, tenantOf, claimedAt, e.tenant, e.vtime, config);
         const cap = capOf.get(e.tenant);
         if (cap === undefined) break;
         if (held >= cap) break;
         const spent = countSpent(
-          prior,
-          actuallyClaimed,
+          claimWindowOf,
+          tenantClaimed,
           e.tenant,
           windowOf(e.vtime),
-          config,
         );
         if (spent >= (budgetOf.get(e.tenant) ?? 0)) break;
         if (countAllHeld(status, claimedAt, e.vtime, config) >= config.poolCapacity)
           break;
         status.set(e.runId, "held");
-        actuallyClaimed.add(e.runId);
         tenantOf.set(e.runId, e.tenant);
+        tenantClaimed.set(e.runId, e.tenant);
+        claimWindowOf.set(e.runId, windowOf(e.vtime));
         claimedAt.set(e.runId, e.vtime);
         break;
       }
@@ -128,6 +144,14 @@ export function referenceDecision(
       if (status.get(ev.runId) === "cancelled") {
         return { kind: "rejected", runId: ev.runId, reason: "cancelled-before-start" };
       }
+      if (status.get(ev.runId) === "completed") {
+        // SEMANTICS A9 — an identity is single-use.
+        return { kind: "rejected", runId: ev.runId, reason: "run-already-terminal" };
+      }
+      if (status.get(ev.runId) === "held") {
+        // A duplicate of a live claim is ACKED with the grant already issued.
+        return { kind: "admitted", runId: ev.runId };
+      }
       const cap = capOf.get(ev.tenant);
       if (cap === undefined) {
         return { kind: "rejected", runId: ev.runId, reason: "unknown-tenant" };
@@ -137,11 +161,10 @@ export function referenceDecision(
         return { kind: "rejected", runId: ev.runId, reason: "cap-exceeded" };
       }
       const spent = countSpent(
-        prior,
-        actuallyClaimed,
+        claimWindowOf,
+        tenantClaimed,
         ev.tenant,
         windowOf(ev.vtime),
-        config,
       );
       if (spent >= (budgetOf.get(ev.tenant) ?? 0)) {
         return { kind: "rejected", runId: ev.runId, reason: "no-credit" };
@@ -210,23 +233,25 @@ function countAllHeld(
 /**
  * Credits this tenant has spent in the given window, recomputed from history.
  *
- * Counts admits that were ACCEPTED, because credit is debited at claim
- * (SEMANTICS A3) — an admit that was rejected never spent anything.
+ * Counted per RUN that actually took a slot, because credit is debited at claim
+ * (SEMANTICS A3) — an admit that was rejected never spent anything, and a
+ * duplicate admit of a live claim never spent anything either (A9).
+ *
+ * This used to walk the admit EVENTS, which billed an at-least-once retry a
+ * second time. No corpus generated a duplicate runId, so the two definitions
+ * were indistinguishable until the fault injector was wired to the control
+ * plane.
  */
 function countSpent(
-  prior: readonly RefEvent[],
-  actuallyClaimed: ReadonlySet<string>,
+  claimWindowOf: ReadonlyMap<string, number>,
+  tenantClaimed: ReadonlyMap<string, TenantId>,
   tenant: TenantId,
   window: number,
-  config: ControlPlaneConfig,
 ): number {
   let n = 0;
-  for (const e of prior) {
-    if (e.kind !== "admit") continue;
-    if (e.tenant !== tenant) continue;
-    if (Math.floor(e.vtime / config.windowTicks) !== window) continue;
-    // It counts only if it actually took a slot — see `actuallyClaimed`.
-    if (!actuallyClaimed.has(e.runId)) continue;
+  for (const [runId, w] of claimWindowOf) {
+    if (w !== window) continue;
+    if (tenantClaimed.get(runId) !== tenant) continue;
     n++;
   }
   return n;

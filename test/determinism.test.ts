@@ -2,9 +2,12 @@ import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { DEFAULT_CONFIG, runSimulation, NaivePolicy } from "../src/core/simulate.js";
 import { Rng } from "../src/core/rng.js";
 import { EventQueue } from "../src/core/clock.js";
+import { ControlPlane } from "../src/policy/controlPlane.js";
+import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
 
 /**
  * THE DETERMINISM GUARD.
@@ -103,6 +106,117 @@ describe("determinism guard", () => {
     const r = runSimulation({ ...DEFAULT_CONFIG, seed: 1 }, new NaivePolicy(4));
     expect(r.log.length).toBeGreaterThan(0);
     expect(r.eventsProcessed).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * THE SAME GUARD, POINTED AT THE CONTROL PLANE.
+ *
+ * Everything above runs `NaivePolicy` — the M0 placeholder whose own docstring
+ * says it "is NOT the control plane and makes no correctness claim". It exists
+ * so the spine has a decision stream to hash. That made the headline number
+ * ("1,000 seeds byte-identical") a statement about a fifty-line toy with one
+ * counter and one RNG draw, while `ControlPlane`, `ReplayLog` and `Substrate`
+ * — the three things the project is actually about — had no determinism guard
+ * at all.
+ *
+ * The claim turns out to hold for them. But an unguarded true claim is one
+ * refactor away from an unguarded false one, and "we checked the wrong
+ * artifact" is the failure this workspace has already been bitten by twice.
+ */
+describe("determinism guard — the CONTROL PLANE", () => {
+  const CP_SEEDS = 500;
+
+  /** A seeded workload driven entirely through the three real operations. */
+  function planeHash(seed: number): string {
+    const rng = new Rng(seed);
+    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
+    const tenants = DEFAULT_CONTROL_PLANE.tenants.map((t) => t.id);
+    const held = new Map<string, { slotId: string; token: number }>();
+    const h = createHash("sha256");
+    let vtime = 0;
+
+    for (let i = 0; i < 120; i++) {
+      vtime += rng.nextInt(0, 4);
+      const runId = `r${i}`;
+      const roll = rng.nextInt(0, 100);
+      if (roll < 55 || held.size === 0) {
+        const tenant = tenants[rng.nextInt(0, tenants.length)] as string;
+        const r = plane.admit(vtime, tenant, runId);
+        if (r.ok) held.set(runId, { slotId: r.slotId, token: r.token });
+        h.update(JSON.stringify(r));
+      } else {
+        const keys = [...held.keys()].sort();
+        const victim = keys[rng.nextInt(0, keys.length)] as string;
+        const slot = held.get(victim);
+        held.delete(victim);
+        if (roll < 75)
+          h.update(JSON.stringify(plane.complete(vtime, victim, "completed")));
+        else if (roll < 90 && slot !== undefined)
+          h.update(JSON.stringify(plane.release(vtime, slot.slotId, slot.token)));
+        else h.update(plane.cancel(vtime, victim));
+      }
+      // Final state, order-insensitively: the maps the plane exposes iterate in
+      // tenant-CONSTRUCTION order, so serializing them raw would make this
+      // guard fail for a config reordering rather than for nondeterminism.
+      h.update(
+        `${plane.totalClaimed}|${sortedPairs(plane.inFlightByTenant())}|` +
+          `${sortedPairs(plane.creditsSpentMap())}|${JSON.stringify(plane.log.assignedIds())}`,
+      );
+    }
+    return h.digest("hex");
+  }
+
+  function sortedPairs(m: ReadonlyMap<string, number>): string {
+    return JSON.stringify(
+      [...m].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+    );
+  }
+
+  it(`is byte-identical across ${CP_SEEDS} seeds run twice in-process`, () => {
+    const mismatches: number[] = [];
+    for (let seed = 1; seed <= CP_SEEDS; seed++) {
+      if (planeHash(seed) !== planeHash(seed)) mismatches.push(seed);
+    }
+    expect(mismatches, "control-plane seeds that differed between two runs").toEqual([]);
+  });
+
+  it("produces DIFFERENT logs for different seeds (guard is not vacuous)", () => {
+    const hashes = new Set<string>();
+    for (let seed = 1; seed <= 200; seed++) hashes.add(planeHash(seed));
+    expect(hashes.size).toBeGreaterThan(190);
+  });
+
+  it("does not depend on the ORDER the tenants were configured in", () => {
+    // Construction order is the subtlest determinism leak there is, and the
+    // control plane seeds three Maps from `config.tenants` in array order.
+    // `runSimulation` guards this explicitly (it sorts the tenant list);
+    // `ControlPlane` does not, so the property is asserted instead.
+    const forward = DEFAULT_CONTROL_PLANE;
+    const reversed = {
+      ...DEFAULT_CONTROL_PLANE,
+      tenants: [...DEFAULT_CONTROL_PLANE.tenants].reverse(),
+    };
+    const decisionsFor = (cfg: typeof forward, seed: number): string => {
+      const rng = new Rng(seed);
+      const plane = new ControlPlane(cfg);
+      const tenants = DEFAULT_CONTROL_PLANE.tenants.map((t) => t.id);
+      const out: string[] = [];
+      let vtime = 0;
+      for (let i = 0; i < 80; i++) {
+        vtime += rng.nextInt(0, 4);
+        const tenant = tenants[rng.nextInt(0, tenants.length)] as string;
+        const r = plane.admit(vtime, tenant, `r${i}`);
+        out.push(r.ok ? `admit:${r.slotId}:${r.token}` : `reject:${r.reason}`);
+      }
+      return out.join("|");
+    };
+    for (let seed = 1; seed <= 100; seed++) {
+      expect(
+        decisionsFor(reversed, seed),
+        `seed ${seed}: reordering the tenant config changed the decisions`,
+      ).toBe(decisionsFor(forward, seed));
+    }
   });
 });
 
