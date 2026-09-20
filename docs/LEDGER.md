@@ -13,7 +13,7 @@ interviewer will ask which is which.
 said they were fed. **L22–L27 came from a second audit** that asked a narrower
 question: which decisions do the two engines share WITHOUT having written them
 down? The distinction is stated because it is the honest one, and because the
-ratio it produces is the most useful thing in this file: sixteen of twenty-seven
+ratio it produces is the most useful thing in this file: eighteen of twenty-nine
 findings were in the checking apparatus, not in the system under test.
 
 | #   | Found by                                        | Severity       | What                                                                                                                                                           |
