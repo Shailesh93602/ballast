@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { ControlPlane } from "../src/policy/controlPlane.js";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
 import { Rng } from "../src/core/rng.js";
 import { Substrate, DEFAULT_SUBSTRATE, HONEST_SUBSTRATE } from "../src/sim/substrate.js";
-import { checkAll, type CheckableState } from "../src/oracle/invariants.js";
+import { checkAll } from "../src/oracle/invariants.js";
+import { DrivenPlane } from "./support/planeHarness.js";
 
 /**
  * THE FAULT INJECTOR, CONNECTED TO THE CONTROL PLANE.
@@ -121,28 +121,6 @@ function deliver(ops: readonly Op[], substrate: Substrate): Op[] {
   });
 }
 
-function stateOf(plane: ControlPlane, vtime: number): CheckableState {
-  const c = plane.counters;
-  return {
-    vtime,
-    inFlightByTenant: plane.inFlightByTenant(),
-    capByTenant: plane.capsMap(),
-    poolCapacity: DEFAULT_CONTROL_PLANE.poolCapacity,
-    totalClaimed: plane.totalClaimed,
-    claimsGranted: c.claimsGranted,
-    releasesDone: c.releasesDone,
-    creditsSpent: plane.creditsSpentMap(),
-    creditsExpected: plane.creditsExpected(),
-    slotOwnerToken: new Map(),
-    acceptedReleases: c.acceptedReleases,
-    replayIds: plane.log.assignedIds(),
-    effectCounts: plane.effectCountsMap(),
-    quiesced: false,
-    ticksSinceQuiesce: 0,
-    livenessBoundN: 100,
-  };
-}
-
 interface RunResult {
   readonly violations: Array<{ seed: number; invariant: string; detail: string }>;
   readonly faultsInjected: number;
@@ -164,23 +142,15 @@ function runCorpus(seeds: number, faulted: boolean): RunResult {
     faultsInjected += substrate.injectedCount;
     opsDelivered += ops.length;
 
-    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-    const held = new Map<string, { slotId: string; token: number }>();
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
 
     for (const op of ops) {
-      if (op.kind === "admit") {
-        const r = plane.admit(op.vtime, op.tenant, op.runId);
-        if (r.ok) held.set(op.runId, { slotId: r.slotId, token: r.token });
-      } else if (op.kind === "release") {
-        const h = held.get(op.runId);
-        if (h !== undefined) plane.release(op.vtime, h.slotId, h.token);
-      } else if (op.kind === "complete") {
-        plane.complete(op.vtime, op.runId, "completed");
-      } else {
-        plane.cancel(op.vtime, op.runId);
-      }
+      if (op.kind === "admit") d.admit(op.vtime, op.tenant, op.runId);
+      else if (op.kind === "release") d.release(op.vtime, op.runId);
+      else if (op.kind === "complete") d.complete(op.vtime, op.runId);
+      else d.cancel(op.vtime, op.runId);
 
-      const found = checkAll(stateOf(plane, op.vtime));
+      const found = checkAll(d.state(op.vtime));
       if (found.length > 0) {
         const first = found[0]!;
         violations.push({ seed, invariant: first.invariant, detail: first.detail });
@@ -236,32 +206,32 @@ describe("a retried request is a DUPLICATE request (SEMANTICS A9)", () => {
    * one logical run.
    */
   it("a duplicate admit does not consume a second slot or a second credit", () => {
-    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-    const first = plane.admit(0, "acme", "r1");
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    const first = d.admit(0, "acme", "r1");
     expect(first.ok).toBe(true);
 
-    const retry = plane.admit(1, "acme", "r1");
+    const retry = d.admit(1, "acme", "r1");
     expect(retry.ok, "the retry must still be answered ok — it succeeded").toBe(true);
 
-    expect(plane.totalClaimed, "one run, one slot").toBe(1);
-    expect(plane.creditsSpentMap().get("acme"), "one run, one credit").toBe(1);
-    expect(checkAll(stateOf(plane, 1))).toEqual([]);
+    expect(d.plane.totalClaimed, "one run, one slot").toBe(1);
+    expect(d.plane.creditsSpentMap(1).get("acme"), "one run, one credit").toBe(1);
+    expect(checkAll(d.state(1))).toEqual([]);
   });
 
   it("the retry echoes the ORIGINAL slot and token, so the caller can still release", () => {
     // Answering with a fresh token would leave the caller holding a token the
     // plane has forgotten — the same shape as L6, where duplicates answered
     // replayId 0 and a correlating caller was silently misled.
-    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-    const first = plane.admit(0, "acme", "r1");
-    const retry = plane.admit(1, "acme", "r1");
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    const first = d.admit(0, "acme", "r1");
+    const retry = d.admit(1, "acme", "r1");
     expect(first.ok && retry.ok).toBe(true);
     if (!first.ok || !retry.ok) return;
 
     expect(retry.slotId).toBe(first.slotId);
     expect(retry.token).toBe(first.token);
-    expect(plane.release(2, retry.slotId, retry.token).ok).toBe(true);
-    expect(plane.totalClaimed).toBe(0);
+    expect(d.plane.release(2, retry.slotId, retry.token).ok).toBe(true);
+    expect(d.plane.totalClaimed).toBe(0);
   });
 
   it("an admit arriving AFTER the run completed is REFUSED — ids are single-use", () => {
@@ -269,18 +239,103 @@ describe("a retried request is a DUPLICATE request (SEMANTICS A9)", () => {
     // I8 makes concrete: a new RunState resets `effectApplied`, so completing
     // the re-admitted run would apply the effect for `r1` a SECOND time. That
     // violation is reachable through this door and no other.
-    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-    expect(plane.admit(0, "acme", "r1").ok).toBe(true);
-    plane.complete(1, "r1", "completed");
-    expect(plane.effectCountsMap().get("r1")).toBe(1);
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    expect(d.admit(0, "acme", "r1").ok).toBe(true);
+    d.complete(1, "r1");
+    expect(d.plane.effectCountsMap().get("r1")).toBe(1);
 
-    const late = plane.admit(2, "acme", "r1");
+    const late = d.admit(2, "acme", "r1");
     expect(late.ok, "a late duplicate must not resurrect a finished run").toBe(false);
     if (!late.ok) expect(late.reason).toBe("run-already-terminal");
 
-    plane.complete(3, "r1", "completed");
-    expect(plane.effectCountsMap().get("r1"), "still exactly one effect").toBe(1);
-    expect(plane.creditsSpentMap().get("acme"), "and exactly one credit").toBe(1);
-    expect(checkAll(stateOf(plane, 3))).toEqual([]);
+    d.complete(3, "r1");
+    expect(d.plane.effectCountsMap().get("r1"), "still exactly one effect").toBe(1);
+    expect(d.plane.creditsSpentMap(3).get("acme"), "and exactly one credit").toBe(1);
+    expect(checkAll(d.state(3))).toEqual([]);
+  });
+});
+
+describe("a claim that is GONE is not a duplicate of anything (SEMANTICS A10, C7)", () => {
+  /**
+   * THE FOURTH DOOR.
+   *
+   * C6 asked "is this still my slot?" of every path that FREES a slot, after
+   * L10 found `complete()` and `cancel()` freeing by id alone. It enumerated
+   * three doors because those were the three that free. The path that GRANTS a
+   * slot back — A9's duplicate-admit echo — was never asked, and it was
+   * checking only that the named slot EXISTS. Slots are never removed from the
+   * array, so that check was always true.
+   */
+  it("a re-admit after RELEASE takes a fresh slot instead of echoing a dead grant", () => {
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    const first = d.admit(0, "acme", "r1");
+    expect(first.ok).toBe(true);
+    expect(d.release(1, "r1")?.ok).toBe(true);
+    expect(d.plane.totalClaimed, "the slot went back to the pool").toBe(0);
+
+    const again = d.admit(2, "acme", "r1");
+    expect(again.ok).toBe(true);
+    if (!again.ok || !first.ok) return;
+
+    // Pre-fix this answered `ok: true` with slot-0 and token 1 while
+    // totalClaimed stayed 0 — a grant for a slot the plane did not hold.
+    expect(d.plane.totalClaimed, "a fresh claim actually takes a slot").toBe(1);
+    expect(again.token, "a fresh claim gets a fresh fencing token").toBeGreaterThan(
+      first.token,
+    );
+    expect(
+      d.plane.creditsSpentMap(2).get("acme"),
+      "a second claim is a second debit (A3, A10)",
+    ).toBe(2);
+    expect(checkAll(d.state(2))).toEqual([]);
+  });
+
+  it("a re-admit after the slot was RECLAIMED never names the new owner's slot", () => {
+    // The worst shape of it: acme's lease expires, globex takes the slot, and
+    // acme's at-least-once retry arrives. Pre-fix acme was answered
+    // `slotId: slot-0, token: 1, leaseUntil: <globex's>` — globex's slot,
+    // globex's lease, acme's dead token — while acme's in-flight stayed 0.
+    const d = new DrivenPlane({
+      ...DEFAULT_CONTROL_PLANE,
+      poolCapacity: 1,
+      leaseTicks: 10,
+      tenants: [
+        { id: "acme", cap: 1, creditsPerWindow: 50 },
+        { id: "globex", cap: 1, creditsPerWindow: 50 },
+      ],
+    });
+    const acme = d.admit(0, "acme", "r1");
+    expect(acme.ok).toBe(true);
+    const globex = d.admit(20, "globex", "g1");
+    expect(globex.ok, "globex claims the expired slot").toBe(true);
+    if (!acme.ok || !globex.ok) return;
+    expect(acme.slotId).toBe(globex.slotId);
+
+    const retry = d.admit(21, "acme", "r1");
+    expect(retry.ok, "the pool is full, so the retry must be REFUSED").toBe(false);
+    if (retry.ok) {
+      expect(retry.token, "never hand back a token the slot no longer holds").not.toBe(
+        acme.token,
+      );
+    }
+    expect(
+      d.plane.inFlightByTenant().get("globex"),
+      "globex must still hold its slot",
+    ).toBe(1);
+    expect(checkAll(d.state(21))).toEqual([]);
+  });
+
+  it("a duplicate of a LIVE claim still echoes — A9 is unchanged", () => {
+    // The boundary in the other direction: tightening the check must not turn
+    // the at-least-once retry A9 exists for into a second claim.
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    const first = d.admit(0, "acme", "r1");
+    const retry = d.admit(1, "acme", "r1");
+    expect(first.ok && retry.ok).toBe(true);
+    if (!first.ok || !retry.ok) return;
+    expect(retry.slotId).toBe(first.slotId);
+    expect(retry.token).toBe(first.token);
+    expect(d.plane.totalClaimed).toBe(1);
+    expect(d.plane.creditsSpentMap(1).get("acme")).toBe(1);
   });
 });

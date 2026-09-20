@@ -189,7 +189,7 @@ describe("Tier 1 — behavioural mutants against the real components", () => {
     const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
     // acme cap is 3; fire 12 admits and confirm only 3 credits moved.
     for (let i = 0; i < 12; i++) plane.admit(0, "acme", `r${i}`);
-    expect(plane.creditsSpentMap().get("acme")).toBe(3);
+    expect(plane.creditsSpentMap(0).get("acme")).toBe(3);
   });
 
   it("M13: a stale release is refused, not accepted", () => {

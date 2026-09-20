@@ -53,21 +53,17 @@ export function byKey<T>(items: readonly T[], key: (item: T) => string): T[] {
 }
 
 /**
- * Sort a copy by a numeric key, with a string tiebreak so the result is a total
- * order. A comparator that returns 0 for distinct elements leaves their relative
- * order to the engine's sort stability, which is exactly the ambiguity we are
- * trying to remove.
+ * NOTE: there is deliberately no `byNumberThen()`.
+ *
+ * It sorted by a numeric key with a string tiebreak, and its own comment said
+ * it existed because "a comparator that returns 0 for distinct elements leaves
+ * their relative order to the engine's sort stability, which is exactly the
+ * ambiguity we are trying to remove" — the determinism claim this whole project
+ * rests on. Nothing called it. Deterministic iteration is done by
+ * `sortedMapEntries` above, which IS called.
+ *
+ * Found the same way as `EventQueue.isEmpty`: its mutants survived, because a
+ * function nothing calls cannot be observed to be wrong. That is L5's dead
+ * state one layer out — and the reusable check behind both is the plain one,
+ * `grep` every export for callers outside its own file (LEDGER L29).
  */
-export function byNumberThen<T>(
-  items: readonly T[],
-  num: (item: T) => number,
-  tiebreak: (item: T) => string,
-): T[] {
-  return [...items].sort((a, b) => {
-    const d = num(a) - num(b);
-    if (d !== 0) return d;
-    const ta = tiebreak(a);
-    const tb = tiebreak(b);
-    return ta < tb ? -1 : ta > tb ? 1 : 0;
-  });
-}

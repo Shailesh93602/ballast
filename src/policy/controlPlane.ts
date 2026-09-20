@@ -1,7 +1,6 @@
-import { sortedMapEntries } from "../core/order.js";
-import type { AcceptedRelease } from "../oracle/invariants.js";
 import { ReplayLog } from "./replayLog.js";
 import {
+  type AcceptedRelease,
   type AdmitOutcome,
   type CompleteOutcome,
   type ControlPlaneConfig,
@@ -64,14 +63,16 @@ interface RunState {
    */
   token: FencingToken;
   /**
-   * The tumbling window this run spent its credit in — SEMANTICS A1/A3.
+   * NOTE: there is deliberately no `claimedWindow` here.
    *
-   * `creditsSpent` resets on every window roll, so an "independent
-   * recomputation" of it that counts runs across ALL windows is not a
-   * recomputation of the same quantity. It agreed only because no corpus
-   * history ever crossed a boundary.
+   * It existed to let `creditsExpected()` — a method ON this class, reading
+   * `this.runs` — recompute the credit ledger. That was never an independent
+   * oracle: two views of one piece of state can disagree about their own
+   * consistency and nothing else. I4's expected side is now
+   * `referenceCreditsSpent()`, which rebuilds the ledger from the EVENT
+   * HISTORY and shares no machinery with this class. The field went with the
+   * method rather than being left looking load-bearing (L5's lesson).
    */
-  claimedWindow: number;
   status: "admitted" | "completed" | "cancelled";
   /** Set once the effect has been applied — I8's identity. */
   effectApplied: boolean;
@@ -85,9 +86,25 @@ export class ControlPlane {
   private readonly runs = new Map<RunId, RunState>();
   private readonly caps = new Map<TenantId, number>();
   private readonly creditsPerWindow = new Map<TenantId, number>();
-  /** Credits spent in the CURRENT window, per tenant. */
+  /**
+   * Credits spent in the window named by `creditsWindow`, per tenant.
+   *
+   * THE PAIR IS THE POINT. The counter alone used to be rolled lazily, from
+   * inside `admit`, so between a window boundary and the next admission it
+   * still described an epoch that had ENDED. That was invisible to every
+   * admission decision — `admit` rolls before it reads — and therefore harmless
+   * until something else read the ledger. An oracle that derives the window
+   * from an event's own virtual time is exactly such a reader, and the
+   * disagreement it reported was real: the plane's answer to "how much has acme
+   * spent this window" depended on when acme last asked (LEDGER L25).
+   *
+   * Storing the window WITH the counter makes every read a projection at `now`
+   * (SEMANTICS A11), so the ledger is a function of virtual time rather than of
+   * traffic. There is no `rollWindowIfNeeded` any more: nothing needs to be
+   * rolled if nothing is stale.
+   */
   private readonly creditsSpent = new Map<TenantId, number>();
-  private currentWindow = 0;
+  private creditsWindow = 0;
   private nextToken: FencingToken = 1;
 
   readonly log: ReplayLog;
@@ -109,7 +126,6 @@ export class ControlPlane {
     for (const t of config.tenants) {
       this.caps.set(t.id, t.cap);
       this.creditsPerWindow.set(t.id, t.creditsPerWindow);
-      this.creditsSpent.set(t.id, 0);
     }
     for (let i = 0; i < config.poolCapacity; i++) {
       this.slots.push({
@@ -151,8 +167,27 @@ export class ControlPlane {
     return this.caps;
   }
 
-  creditsSpentMap(): ReadonlyMap<TenantId, number> {
-    return this.creditsSpent;
+  /** The credit ledger as of `now` — SEMANTICS A1, A11. */
+  creditsSpentMap(now: number): ReadonlyMap<TenantId, number> {
+    const out = new Map<TenantId, number>();
+    for (const t of this.config.tenants) out.set(t.id, this.spentAt(now, t.id));
+    return out;
+  }
+
+  /** Credits this tenant has spent in the tumbling window containing `now`. */
+  private spentAt(now: number, tenant: TenantId): number {
+    if (Math.floor(now / this.config.windowTicks) !== this.creditsWindow) return 0;
+    return this.creditsSpent.get(tenant) ?? 0;
+  }
+
+  /** Debit one credit, rolling the window first if `now` has left it. */
+  private debit(now: number, tenant: TenantId): void {
+    const window = Math.floor(now / this.config.windowTicks);
+    if (window !== this.creditsWindow) {
+      this.creditsWindow = window;
+      this.creditsSpent.clear();
+    }
+    this.creditsSpent.set(tenant, (this.creditsSpent.get(tenant) ?? 0) + 1);
   }
 
   effectCountsMap(): ReadonlyMap<string, number> {
@@ -165,13 +200,6 @@ export class ControlPlane {
    * Tumbling, not sliding (SEMANTICS A1). The accepted cost — a 2x burst across
    * a window boundary — is stated in that row rather than discovered later.
    */
-  private rollWindowIfNeeded(now: number): void {
-    const window = Math.floor(now / this.config.windowTicks);
-    if (window === this.currentWindow) return;
-    this.currentWindow = window;
-    for (const t of this.config.tenants) this.creditsSpent.set(t.id, 0);
-  }
-
   /**
    * Reclaim expired leases lazily, on demand (SEMANTICS C5).
    *
@@ -213,7 +241,6 @@ export class ControlPlane {
    * of admissions.
    */
   admit(now: number, tenant: TenantId, runId: RunId): AdmitOutcome {
-    this.rollWindowIfNeeded(now);
     this.reclaimExpired(now);
 
     const cap = this.caps.get(tenant);
@@ -236,8 +263,24 @@ export class ControlPlane {
       // ACKED, not errored, for the same reason E7 acks a duplicate completion:
       // an error makes an at-least-once sender retry forever. No slot is taken
       // and no credit moves, because neither was a second time.
+      //
+      // "STILL LIVE" IS A FENCING QUESTION, NOT AN EXISTENCE ONE (SEMANTICS C7).
+      // This branch used to check only that the named slot EXISTS — which it
+      // always does, since slots are never removed. So it echoed a grant for a
+      // claim that was already gone, through two reachable doors:
+      //
+      //   - after `release()`, which nulls `slot.tenant` but leaves
+      //     `run.slotId` set, so the plane answered ok with a slot it did not
+      //     hold and `totalClaimed` said 0;
+      //   - after the lease expired and ANOTHER tenant reclaimed the slot, so
+      //     acme's retry was answered with globex's slot, globex's lease and
+      //     acme's dead token.
+      //
+      // C6 asked "is this still my slot?" of every path that FREES a slot. This
+      // is the same question asked of the path that GRANTS one — the fourth
+      // door, and the one nobody had put a lock on (LEDGER L22).
       const slot = this.slots.find((s) => s.id === existing.slotId);
-      if (slot !== undefined) {
+      if (slot !== undefined && slot.tenant !== null && slot.token === existing.token) {
         return {
           ok: true,
           slotId: slot.id,
@@ -245,6 +288,9 @@ export class ControlPlane {
           leaseUntil: slot.leaseUntil,
         };
       }
+      // The claim is gone — released, expired, or handed to someone else. This
+      // is not a duplicate of anything live, so it falls through and makes a
+      // FRESH claim: a new slot, a new token and a new credit (SEMANTICS A10).
     }
 
     // The atomic region begins here. Everything from this point to the slot
@@ -252,7 +298,7 @@ export class ControlPlane {
     const inFlight = this.inFlightByTenant().get(tenant) ?? 0;
     if (inFlight >= cap) return { ok: false, reason: "cap-exceeded" };
 
-    const spent = this.creditsSpent.get(tenant) ?? 0;
+    const spent = this.spentAt(now, tenant);
     const budget = this.creditsPerWindow.get(tenant) ?? 0;
     if (spent >= budget) return { ok: false, reason: "no-credit" };
 
@@ -267,13 +313,12 @@ export class ControlPlane {
     // Credit is debited AT CLAIM (SEMANTICS A3) — the single most consequential
     // row in the document. Debiting at admit bills for work that may never run;
     // debiting at completion cannot bound concurrency at all.
-    this.creditsSpent.set(tenant, spent + 1);
+    this.debit(now, tenant);
     this.runs.set(runId, {
       runId,
       tenant,
       slotId: free.id,
       token: free.token,
-      claimedWindow: this.currentWindow,
       status: "admitted",
       effectApplied: false,
     });
@@ -320,7 +365,6 @@ export class ControlPlane {
     // where I1 and I2 disagree.
     slot.tenant = null;
     this.releasesDone++;
-    void now;
     return { ok: true };
   }
 
@@ -448,10 +492,9 @@ export class ControlPlane {
         runId,
         tenant: "",
         slotId: null,
-        // No slot was ever claimed, so there is no token and no window in which
-        // credit was spent. 0 is never a live token — `nextToken` starts at 1.
+        // No slot was ever claimed, so there is no token. 0 is never a live
+        // token — `nextToken` starts at 1.
         token: 0,
-        claimedWindow: -1,
         status: "cancelled",
         effectApplied: false,
       });
@@ -461,31 +504,28 @@ export class ControlPlane {
     if (run.status === "cancelled") return "noop"; // D4
     run.status = "cancelled";
     this.freeSlotOf(run);
-    void now;
     return "cancelled";
   }
 
   /**
-   * Independent recomputation of credits, for I4's differential check.
+   * THE FENCING TOKEN OF EVERY SLOT THAT IS CURRENTLY OWNED — raw state.
    *
-   * SCOPED TO THE CURRENT WINDOW, because that is what `creditsSpent` measures.
-   * It previously counted every run ever admitted, across all windows — so the
-   * two quantities were only equal before the first boundary. Two things hid
-   * that: the corpus passed `creditsSpentMap()` as BOTH sides of I4, so the
-   * invariant compared a map to itself and could not fire; and no generated
-   * history ever reached tick 100, so the boundary was never crossed even
-   * once. Either mask alone would have been enough. (SEMANTICS A1, A2, A3.)
+   * `CheckableState.slotOwnerToken` has existed since the checker was written,
+   * documented as "slotId -> the fencing token of its current owner". No
+   * invariant read it and every corpus passed `new Map()`, so it was a declared
+   * oracle input that nothing wrote and nothing consumed — the same dead-state
+   * shape as L5, one layer up in the apparatus (LEDGER L24).
+   *
+   * It is now populated from the slot array directly and read by I5. That
+   * matters beyond deleting a dead field: `acceptedReleases` is a list the PLANE
+   * curates, so the plane still chooses which releases the checker gets to
+   * judge. This is a snapshot the plane does not filter — it is the slot table,
+   * and the checker draws its own conclusions from it.
    */
-  creditsExpected(): ReadonlyMap<TenantId, number> {
-    const out = new Map<TenantId, number>();
-    for (const t of this.config.tenants) out.set(t.id, 0);
-    for (const [, run] of sortedMapEntries(
-      new Map([...this.runs].map(([k, v]) => [k, v])),
-    )) {
-      if (run.tenant === "") continue;
-      if (run.status === "cancelled" && run.slotId === null) continue;
-      if (run.claimedWindow !== this.currentWindow) continue;
-      out.set(run.tenant, (out.get(run.tenant) ?? 0) + 1);
+  slotTokens(): ReadonlyMap<SlotId, FencingToken> {
+    const out = new Map<SlotId, FencingToken>();
+    for (const s of this.slots) {
+      if (s.tenant !== null) out.set(s.id, s.token);
     }
     return out;
   }

@@ -38,6 +38,16 @@ export interface SubscriberState {
   inFlight: number;
 }
 
+/**
+ * The largest delivery window a subscriber may be granted — SEMANTICS E9.
+ *
+ * The number itself is a configuration choice, not a correctness one. What is a
+ * correctness choice is that the ceiling belongs to the PUBLISHER: a subscriber
+ * that names its own window is not being flow-controlled, it is being asked
+ * politely.
+ */
+export const DEFAULT_MAX_CREDITS = 64;
+
 export class ReplayLog {
   private entries: LogEntry[] = [];
   private nextId: ReplayId = 1;
@@ -45,10 +55,30 @@ export class ReplayLog {
   private oldestRetained: ReplayId = 1;
   private readonly retentionCount: number;
   private readonly retentionTicks: number;
+  private readonly maxCredits: number;
+  /**
+   * How many grants have been clamped — observability, not correctness.
+   *
+   * A paused subscriber looks exactly like a publisher with nothing to send
+   * (E10), so an operator debugging a stall needs to be able to tell "it asked
+   * for a smaller window" from "something is broken". A silent clamp is the
+   * same failure as E2's silent fast-forward, one layer over.
+   */
+  clampedGrants = 0;
 
-  constructor(retentionCount: number, retentionTicks: number) {
+  constructor(
+    retentionCount: number,
+    retentionTicks: number,
+    maxCredits: number = DEFAULT_MAX_CREDITS,
+  ) {
     this.retentionCount = retentionCount;
     this.retentionTicks = retentionTicks;
+    this.maxCredits = maxCredits;
+  }
+
+  /** The publisher's ceiling on a delivery window — SEMANTICS E9. */
+  get creditCeiling(): number {
+    return this.maxCredits;
   }
 
   get size(): number {
@@ -143,6 +173,20 @@ export class ReplayLog {
    * Doing it here rather than in `deliver` is what makes backpressure real: an
    * unresponsive subscriber accumulates `inFlight`, exhausts its window, and
    * stops being sent anything until it catches up.
+   *
+   * `grantedCredits` IS A REQUEST, NOT A SETTING (SEMANTICS E9). It used to be
+   * assigned straight through — `sub.credits = grantedCredits` — so a
+   * subscriber could name any window it liked, including one larger than the
+   * log, and be sent everything in a single delivery. Credit-based flow control
+   * that only constrains the subscribers who choose to be constrained is not
+   * flow control. The publisher's ceiling is the decision; the clamp is
+   * recorded rather than silent, because a clamped subscriber and a stalled one
+   * look identical from the outside.
+   *
+   * A grant BELOW the outstanding in-flight count is legal and pauses the
+   * subscriber (E10) — that is E5's pause reached from the other direction, and
+   * it is recoverable because every in-flight entry has already been delivered
+   * and can therefore be acknowledged.
    */
   acknowledge(
     sub: SubscriberState,
@@ -155,6 +199,9 @@ export class ReplayLog {
     }
     sub.inFlight = Math.max(0, sub.inFlight - acked);
     sub.cursor = Math.max(sub.cursor, upToInclusive + 1);
-    sub.credits = grantedCredits;
+
+    const bounded = Math.max(0, Math.min(grantedCredits, this.maxCredits));
+    if (bounded !== grantedCredits) this.clampedGrants++;
+    sub.credits = bounded;
   }
 }

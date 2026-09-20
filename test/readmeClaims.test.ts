@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
+import { DEFAULT_CONFIG, NaivePolicy, runSimulation } from "../src/core/simulate.js";
 import {
   FAIRNESS_SEEDS,
   cappedStarvation,
@@ -141,6 +142,11 @@ describe("README numbers are reproducible", () => {
       { label: "300 differential histories", needle: /seed <= 300/ },
       { label: "500 KhataGO protocol runs", needle: /seed <= 500/ },
       { label: "60 fairness seeds", needle: /seed <= 60/ },
+      { label: "200 quiescence seeds", needle: /SEEDS = 200/ },
+      {
+        label: "9 precedence overlap scenarios",
+        needle: /const SCENARIOS: Scenario\[\]/,
+      },
     ];
     const missing = corpusClaims
       .filter((c) => !c.needle.test(sources))
@@ -284,9 +290,17 @@ describe("README numbers are reproducible", () => {
     // `[\w-]+`, not `\w+`: the count crossed twenty and became "twenty-one",
     // which `\w` cannot span. The guard then matched nothing and reported
     // `expected null not to be null` — fail-loud, but naming the wrong thing.
+    //
+    // MATCHED AGAINST WHITESPACE-COLLAPSED PROSE. The regex used to run against
+    // the raw file, so whether it matched depended on where the sentence
+    // happened to WRAP — add a word earlier in the paragraph and this guard
+    // reports `expected null not to be null`, which names neither the real
+    // problem nor the file. Fail-loud is not enough on its own; it has to fail
+    // for the reason it exists.
+    const flat = readme.replace(/\s+/g, " ");
     const sentence =
       /([\w-]+) of the ([\w-]+) were in the \*\*checker, the reference oracle or the harness\*\*[^.]*\./.exec(
-        readme,
+        flat,
       );
 
     it("the ledger table has at least one row and one apparatus finding", () => {
@@ -334,6 +348,54 @@ describe("README numbers are reproducible", () => {
         .map((r) => r.id)
         .filter((id) => !new RegExp(`^## ${id} `, "m").test(ledger));
       expect(missing, "ledger rows with no `## Lx ·` write-up").toEqual([]);
+    });
+  });
+
+  /**
+   * THE README PUBLISHES THREE HASHES AND NOTHING REPRODUCED THEM.
+   *
+   * "See it work" shows `simulate --seed 4711 --hash-only` printing a specific
+   * digest and says "the hashes are the ones you will get". They were written
+   * once, by hand, and checked by no test — the exact shape this file exists to
+   * forbid, sitting in the one section a reader is most likely to run.
+   *
+   * It is also the gap that made the determinism suite weaker than it reads.
+   * That suite asserts the same seed hashes the same twice, across processes,
+   * and that different seeds differ. All three properties hold for a WRONG
+   * generator: a mutated PRNG is still perfectly deterministic and still
+   * perfectly distinct. Nothing anywhere pinned an actual value, so nothing
+   * could tell a correct spine from a changed one.
+   */
+  describe("the hashes the README prints are the hashes the code produces", () => {
+    const quoted = [
+      ...readme.matchAll(/simulate --seed (\d+) --hash-only\n([0-9a-f]{64})/g),
+    ].map((m) => ({ seed: Number(m[1]), hash: m[2] as string }));
+
+    it("the README actually quotes some — a parse that finds none proves nothing", () => {
+      expect(quoted.length, "README must show reproducible hash output").toBeGreaterThan(
+        1,
+      );
+    });
+
+    it("every quoted hash is the one the simulation produces", () => {
+      const wrong = quoted
+        .map(({ seed, hash }) => ({
+          seed,
+          quoted: hash,
+          actual: runSimulation(
+            { ...DEFAULT_CONFIG, seed },
+            new NaivePolicy(4),
+          ).log.hash(),
+        }))
+        .filter((r) => r.quoted !== r.actual);
+      expect(wrong, "README hashes that no run reproduces").toEqual([]);
+    });
+
+    it("different seeds in the README really do print different hashes", () => {
+      // Otherwise the block could be satisfied by a spine that ignores the seed.
+      const distinct = new Set(quoted.map((q) => q.hash));
+      const seeds = new Set(quoted.map((q) => q.seed));
+      expect(distinct.size).toBe(seeds.size);
     });
   });
 

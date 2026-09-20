@@ -4,6 +4,9 @@ import { runSale, StockRow } from "../src/policy/flashSale.js";
 import { KhataGoClaimModel } from "../src/policy/khatagoClaim.js";
 import { ReplayLog, type SubscriberState } from "../src/policy/replayLog.js";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
+import { referenceCreditsSpent } from "../src/oracle/reference.js";
+import { checkAll } from "../src/oracle/invariants.js";
+import { DrivenPlane } from "./support/planeHarness.js";
 
 /**
  * Tests written to kill specific mechanical-mutation survivors.
@@ -192,27 +195,34 @@ describe("killing mutation survivors — replay log", () => {
 });
 
 describe("killing mutation survivors — credit accounting", () => {
-  it("kills the creditsExpected mutant — the independent recomputation is exercised", () => {
-    // Survivor: creditsExpected() was never called by any test, so mutating it
-    // changed nothing observable. I4 compares spent against expected, so leaving
-    // the recomputation untested left half of that invariant unguarded.
-    const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-    plane.admit(0, "acme", "r1");
-    plane.admit(0, "acme", "r2");
-    plane.cancel(1, "r3-never-admitted");
+  it("kills the credit-ledger mutants — the HISTORY-DERIVED oracle is exercised", () => {
+    // Survivor context: the expected side of I4 used to be
+    // `ControlPlane.creditsExpected()`, a method on the class it checked. It is
+    // now `referenceCreditsSpent()`, which replays the request stream and shares
+    // no state with the plane — so this test drives both sides and pins them.
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    d.admit(0, "acme", "r1");
+    d.admit(0, "acme", "r2");
+    d.cancel(1, "r3-never-admitted");
 
-    const expected = plane.creditsExpected();
-    const spent = plane.creditsSpentMap();
+    const spent = d.plane.creditsSpentMap(1);
+    const expected = referenceCreditsSpent(
+      DEFAULT_CONTROL_PLANE,
+      d.history,
+      d.history.length - 1,
+      1,
+    );
 
     // Two accepted admits for acme -> two credits, by both routes.
     expect(spent.get("acme")).toBe(2);
     expect(
       expected.get("acme"),
-      "the independent recomputation must agree with the running counter",
+      "the history-derived ledger must agree with the running counter",
     ).toBe(2);
 
-    // A run that was never admitted must not appear as having spent credit.
+    // A cancel for a run that was never admitted spends nothing, for anyone.
     expect(expected.get("")).toBeUndefined();
+    expect(checkAll(d.state(1))).toEqual([]);
   });
 });
 

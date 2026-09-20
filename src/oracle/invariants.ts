@@ -1,4 +1,7 @@
 import { sortedMapEntries } from "../core/order.js";
+import type { AcceptedRelease } from "../policy/types.js";
+
+export type { AcceptedRelease };
 
 /**
  * The invariant checker.
@@ -15,16 +18,6 @@ import { sortedMapEntries } from "../core/order.js";
  */
 
 export type InvariantId = "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8";
-
-export interface AcceptedRelease {
-  readonly slotId: string;
-  /** The token the releasing party presented. */
-  readonly tokenUsed: number;
-  /** The token the slot actually held when the release was accepted. */
-  readonly tokenCurrent: number;
-  /** How many times this slot had already been released in this generation. */
-  readonly priorReleasesOfGeneration: number;
-}
 
 export interface Violation {
   readonly invariant: InvariantId;
@@ -48,7 +41,20 @@ export interface CheckableState {
   readonly creditsSpent: ReadonlyMap<string, number>;
   /** tenant -> credits the ledger says were consumed, recomputed independently. */
   readonly creditsExpected: ReadonlyMap<string, number>;
-  /** slotId -> the fencing token of its current owner. */
+  /**
+   * slotId -> the fencing token of its current owner, for OWNED slots only.
+   *
+   * A RAW SNAPSHOT OF THE SLOT TABLE — and the reason it matters is structural.
+   * `acceptedReleases` is a list the control plane curates: the plane decides
+   * which releases the checker is shown, which is L1's lesson still only half
+   * fixed (the checker judges facts instead of self-assessments, but the plane
+   * still chooses the facts). This map is not curated. The plane maps its slot
+   * array and hands it over; I5 draws its own conclusions.
+   *
+   * It has been declared on this interface since the checker was written, read
+   * by no invariant and passed as `new Map()` by every corpus — a documented
+   * oracle input that nothing wrote and nothing consumed (LEDGER L24).
+   */
   readonly slotOwnerToken: ReadonlyMap<string, number>;
   /**
    * Releases the control plane ACCEPTED, as raw facts: which slot, which token
@@ -177,6 +183,38 @@ function checkI4(s: CheckableState): Violation[] {
  */
 function checkI5(s: CheckableState): Violation[] {
   const out: Violation[] = [];
+
+  // Judged from the RAW slot table, not from anything the plane reports about
+  // itself. C1 makes the fencing counter globally monotonic, and the property
+  // that actually does the work is that two live claims can never present the
+  // same token — if they could, a fencing comparison cannot tell them apart and
+  // every check built on it silently answers "yes" for the wrong claimant.
+  const ownerOfToken = new Map<number, string>();
+  for (const [slotId, token] of sortedMapEntries(s.slotOwnerToken)) {
+    if (token <= 0) {
+      out.push({
+        invariant: "I5",
+        vtime: s.vtime,
+        detail:
+          `slot ${slotId} is owned but carries token ${token} — 0 is the ` +
+          `never-claimed sentinel, so a claim was made without taking a token`,
+      });
+      continue;
+    }
+    const other = ownerOfToken.get(token);
+    if (other !== undefined) {
+      out.push({
+        invariant: "I5",
+        vtime: s.vtime,
+        detail:
+          `slots ${other} and ${slotId} both hold fencing token ${token} — ` +
+          `two live claims a fencing check cannot tell apart (SEMANTICS C1)`,
+      });
+      continue;
+    }
+    ownerOfToken.set(token, slotId);
+  }
+
   for (const r of s.acceptedReleases) {
     if (r.tokenUsed !== r.tokenCurrent) {
       out.push({
