@@ -24,6 +24,8 @@ export type RejectReason =
   | "pool-full"
   | "no-credit"
   | "cancelled-before-start"
+  /** The runId already completed. Identities are single-use — SEMANTICS A9. */
+  | "run-already-terminal"
   | "unknown-tenant";
 
 export type AdmitOutcome =

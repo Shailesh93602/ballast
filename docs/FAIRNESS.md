@@ -67,4 +67,20 @@ This is the same discipline that caught `redlock.test.js` elsewhere in this
 workspace encoding the exact bug it should have detected: **a guarantee nothing
 can violate is not a guarantee.**
 
-_Generated from `test/fairness.test.ts`. Reproduce with `npm test`._
+## Both figures in this document are asserted against a run
+
+Not matched against a remembered literal. The `38 / 60` above used to appear
+here twice, in README.md, and as a hardcoded regex inside
+`readmeClaims.test.ts` — and was produced by none of them; `fairness.test.ts`
+only ever asserted `starvedSeeds > 0`. Nothing read this file at all. So the
+guard amounted to "the README still says what the README says", and had the
+policy changed and the real figure become 41, every test would have stayed
+green while three documents quoted a number no run reproduced.
+
+The measurement now runs inside the claims check, both documents are asserted
+against its result, and the negative check — that no OTHER `N / 60` is lying
+around — is **built from** the computed value with `new RegExp` rather than
+written beside it. (LEDGER L17.)
+
+_Generated from `test/fairness.test.ts` and
+`test/support/fairnessHarness.ts`. Reproduce with `npm test`._

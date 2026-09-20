@@ -41,9 +41,20 @@ ban points everyone at.
 `src/cli/**` and `test/**` are outside the perimeter on purpose: the CLI does
 real file I/O, and the guard itself must spawn processes.
 
-**The rules are tested.** A fixture containing all seven violation classes is
-linted and must produce seven errors inside the perimeter and zero outside it. A
-ban nobody has watched fire is a ban you do not have.
+**The rules are tested — by `test/determinismPerimeter.test.ts`.** A fixture
+containing every banned construct is run through the ESLint API and must be
+rejected inside the perimeter, must NOT be rejected under `test/` or
+`src/cli/`, and `core/order.ts` must keep its sanctioned exception. Both
+directions matter: an exemption silently in force everywhere would make the
+positive half vacuous.
+
+🔴 **This paragraph made that claim for five weeks before the test existed.**
+`grep -r eslint test/` returned nothing. The perimeter enforcing the project's
+central claim had never been observed to reject anything — which is the failure
+the sentence below names, arriving in the document that names it. See LEDGER
+L15.
+
+A ban nobody has watched fire is a ban you do not have.
 
 ## The three ways iteration order leaks
 
@@ -55,8 +66,15 @@ Worth stating separately, because it is the failure mode that survives review:
 2. **`Map` / `Set` insertion order.** Same problem, and more tempting, because a
    `Map` _feels_ like an ordered container.
 3. **Unstable comparators.** A comparator returning `0` for distinct elements
-   leaves their order to the engine's sort. `core/order.ts` never does this —
-   `byNumberThen` always takes a string tiebreak so the order is total.
+   leaves their order to the engine's sort. `byNumberThen` always takes a string
+   tiebreak so the order is total.
+
+   Stated precisely, because the looser version of this sentence ("`order.ts`
+   never does this") was not true: `byKey` DOES return `0` for two distinct
+   items with the same key. That is safe here — `Array.prototype.sort` has been
+   required to be stable since ES2019, so the result is defined rather than
+   engine-dependent — but it is safe for a reason worth naming rather than by
+   the blanket rule the sentence implied.
 
 ## The event-queue tiebreak
 
@@ -90,6 +108,20 @@ xoshiro256\*\*, seeded through SplitMix64, explicitly threaded.
   small decisions (`nextInt(0, 3)`) that read exactly those bits.
 
 ## The guard
+
+### What it covers, and what it did not
+
+For five weeks the guard ran **only `NaivePolicy`** — the M0 skeleton whose own
+docstring says it "is NOT the control plane and makes no correctness claim". So
+did `ballast simulate`. The 1,000-seed figure was therefore a statement about a
+fifty-line toy with one counter and one RNG draw, while `ControlPlane`,
+`ReplayLog` and `Substrate` had no determinism guard at all (LEDGER L16).
+
+The claim held when it was finally checked: 500 control-plane seeds are
+byte-identical run twice, 300 seeds give 300 distinct hashes, and the decisions
+do not depend on the order the tenants were configured in — which `ControlPlane`
+does not guard structurally the way `runSimulation` does (it sorts its tenant
+list; the plane does not). Both guards now exist.
 
 `test/determinism.test.ts`. Four checks, each catching something different:
 

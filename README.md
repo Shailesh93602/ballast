@@ -13,30 +13,56 @@ One integer seed in. One byte-identical decision log out.
 
 ## What it found
 
-A test suite is worth what it caught, not what it asserts. These are real bugs,
-found by the harness, that nobody planted. Planted mutants live in
-[`MUTATION.md`](docs/MUTATION.md) and are deliberately kept out of this list.
+A test suite is worth what it caught, not what it asserts. These are real bugs
+that nobody planted — L1–L9 caught by the harness, L10–L21 caught by auditing
+the harness itself. Planted mutants live in [`MUTATION.md`](docs/MUTATION.md)
+and are deliberately kept out of this list.
 
-| #      | Found by                    | What                                                                                                                                                                                                                                                       |
-| ------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **L2** | Differential oracle, seed 1 | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent.                                                                   |
-| **L1** | Invariant corpus            | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.                                                                             |
-| **L3** | Differential, seed 101      | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                                                                                        |
-| **L6** | Mechanical mutation         | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.                                                                                 |
-| **L4** | Mechanical mutation         | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                                                                                                |
-| **L5** | Mechanical mutation         | Dead state: `slot.runId` written five times, read never.                                                                                                                                                                                                   |
-| **L7** | Mutation run on a red suite | **The harness reported 100% because the suite already failed.** A mutant is killed when the suite fails — so if it fails first, every mutant is killed. The reassuring number was the alarming one.                                                        |
-| **L8** | Testing a surviving mutant  | **A retry-limit branch that could never run**, because contention in the model stopped after attempt 1. The fix corrected the model, not the branch — a busy row stays busy.                                                                               |
-| **L9** | Hand-applying a "survivor"  | **The negation operator didn't negate.** `if (!` spliced without parens turned `if (a !== b)` into `(!a) !== b` — always true — so vacuous mutants "survived" and the score under-read at 87.3%. Fixed and honestly triaged: 95.8%, every survivor argued. |
+| #       | Found by                          | What                                                                                                                                                                                                                                                                  |
+| ------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L2**  | Differential oracle, seed 1       | **A spec gap.** Nothing said whether completing a run releases its slot. The implementation held it until lease expiry; the reference freed it. Neither was wrong — the spec was silent.                                                                              |
+| **L1**  | Invariant corpus                  | **The checker trusted the thing it was checking.** I5 fired on stale releases that were _correctly refused_, because it read the plane's self-assessment instead of raw facts.                                                                                        |
+| **L3**  | Differential, seed 101            | **The reference billed credit that was never spent** — it asked whether a run appeared in the status map, but `cancel` inserts a runId even for a _rejected_ admit.                                                                                                   |
+| **L6**  | Mechanical mutation               | **Every duplicate completion answered `replayId: 0`** — the lookup ran through a helper that unconditionally returned `undefined`, while the endpoint answered `ok: true`.                                                                                            |
+| **L4**  | Mechanical mutation               | **An unreachable branch pretending to be a guard.** `slot.released` was assigned `false` in four places and `true` in none.                                                                                                                                           |
+| **L5**  | Mechanical mutation               | Dead state: `slot.runId` written five times, read never.                                                                                                                                                                                                              |
+| **L7**  | Mutation run on a red suite       | **The harness reported 100% because the suite already failed.** A mutant is killed when the suite fails — so if it fails first, every mutant is killed. The reassuring number was the alarming one.                                                                   |
+| **L8**  | Testing a surviving mutant        | **A retry-limit branch that could never run**, because contention in the model stopped after attempt 1. The fix corrected the model, not the branch — a busy row stays busy.                                                                                          |
+| **L9**  | Hand-applying a "survivor"        | **The negation operator didn't negate.** `if (!` spliced without parens turned `if (a !== b)` into `(!a) !== b` — always true — so vacuous mutants "survived" and the score under-read at 87.3%. Fixed and honestly triaged: 95.8%, every survivor argued.            |
+| **L10** | Differential, long histories      | **The fencing token guarded one of three doors.** `release()` validated it; `complete()` and `cancel()` freed the slot by id. A stale claimant evicted the slot's **current owner** — and I1/I2/I3 all stayed green, because the pool moved further under its bounds. |
+| **L11** | Reading the corpus's wiring       | **I4 compared a map to itself.** The corpus passed `creditsSpentMap()` as both `creditsSpent` and `creditsExpected`, so "the credit ledger is exact" was `x === x` for every event of all 2,000 seeds.                                                                |
+| **L12** | Un-aliasing I4                    | **The "independent recomputation" measured a different quantity** — it counted runs across all windows while the counter it checked resets on every window roll.                                                                                                      |
+| **L13** | Measuring the corpus's reach      | **0 of 2,000 histories ever crossed a window boundary** (max vtime 85 against `windowTicks` 100). SEMANTICS A2 names this exact outcome in its own `Else` clause.                                                                                                     |
+| **L14** | Auditing the retention guard      | **A fully-evicted log answered "nothing new"** instead of `retention-exceeded` — the silent hole E2 exists to forbid, at the one moment it mattered.                                                                                                                  |
+| **L15** | `grep -r eslint test/`            | **DETERMINISM.md described a lint fixture that did not exist.** The perimeter enforcing the central claim had never been watched fire — the failure that document's own last sentence names.                                                                          |
+| **L16** | Reading the determinism guard     | **The 1,000-seed guard only ever ran `NaivePolicy`**, the M0 placeholder. The control plane had no determinism guard at all. (It is deterministic — but nothing was checking.)                                                                                        |
+| **L17** | Auditing the claims tests         | **"38 of 60" was written in four places and computed in none.** The guard asserted that the README still said what the README said.                                                                                                                                   |
+| **L18** | Auditing the shrinker's tests     | **The only S3 test asserted nothing** on the path it actually takes — the shrink succeeds, so the lone `if (!verified)` assertion was skipped every run.                                                                                                              |
+| **L19** | Parse-checking the corpus         | **3 of 165 mutants do not parse** and were scored as kills. A mutant killed by a syntax error measures nothing about the suite.                                                                                                                                       |
+| **L20** | `grep -rn Substrate`              | **The fault injector was connected to nothing.** 173 lines modelling duplicates, reordering, stale readiness and pod death — used by its own unit test and, for one fault kind, by KhataGO. The control plane was never handed a single fault.                        |
+| **L21** | The fault-injected corpus, seed 1 | **A retried admit was a second run.** At-least-once delivery makes a duplicate admit routine; it took a second slot and spent a second credit for one logical run. A7 settled this for completions and nobody asked it of admissions.                                 |
 
 Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
 
-Four of the nine were in the **checker, the reference oracle or the harness**, not the system under
-test — L1 (the checker), L3 (the reference oracle), L7 and L9 (the mutation harness). That ratio is
-the most useful thing this project taught: every layer that grades another needs someone grading it,
-and eventually that someone is you asking what the output would look like if the tool were wrong.
-Both numbers are counted from the table in `LEDGER.md` by a test, so this sentence cannot drift
-from it again.
+Twelve of the twenty-one were in the **checker, the reference oracle or the harness**, not the
+system under test — L1 and L11 (the checker), L3 and L12 (the reference oracle), L7, L9, L15, L16,
+L17, L18, L19 and L20 (the guards, the fault injector and the mutation harness). That ratio is the most useful thing this project
+taught: every layer that grades another needs someone grading it, and eventually that someone is you
+asking what the output would look like if the tool were wrong. Both numbers are counted from the
+table in `LEDGER.md` by a test, so this sentence cannot drift from it again.
+
+**L1–L9 were found by the harness; L10–L21 were found by auditing the harness** — reading what each
+oracle was actually handed, rather than what its field names said it was handed. L11 is the one to
+read: the documented risk was "the reference and the implementation share an author", and the actual
+failure was that the two halves of an invariant shared an _object reference_. L13 is its twin — the
+corpus could not have caught L12 even un-aliased, because no generated history ever reached tick 100.
+
+**L21 is the payoff, and the honest cost.** Four apparatus repairs had to land before a real bug in
+the system under test became visible at all: make I4's two inputs independent (L11), give the
+recomputation the right definition (L12), extend the corpus far enough to reach a window boundary
+(L13), and connect the fault injector to the thing it was supposed to be injecting into (L20). Then
+seed 1 failed immediately. An oracle that has stopped grading does not announce itself — it reports
+success.
 
 **L2 is the one worth reading.** The two engines were built from the same
 specification but not the same assumption, so they **disagreed instead of being
@@ -104,6 +130,22 @@ implementation-against-intent; it cannot validate intent-against-reality. If a
 spec row is wrong, both halves are wrong together and the test passes. That is
 why the invariants exist independently of it.
 
+**And an oracle is only as independent as its INPUTS.** The blind spot above is
+the one that gets written down; the one that actually happened was cruder. I4
+was handed `creditsSpentMap()` as both the value and the expectation, so the
+"exact, no tolerance" credit invariant was `x === x` for every event of all
+2,000 seeds (L11). I5 was handed only the releases that `release()` chose to
+report, so the two other paths that free a slot were outside its field of view
+entirely — which is how L10 lived for five weeks under eight invariants, a
+reference oracle and 165 mutants. **Check what each oracle is passed, not what
+its field names say it is passed.**
+
+**A corpus is worth what it REACHES, not what it runs.** 2,000 histories that
+all stop at tick 85 do not test a window that rolls at 100 (L13). The two
+regimes this corpus depends on — a window boundary, and a slot handed to a
+second claimant — are now asserted to occur, because a corpus size is a
+measure of cost, not of coverage.
+
 **I8 is blind to a wrong identity.** It counts effects per identity, so keying a
 dedup on the wrong field produces two rows each with a legitimate count of one.
 Recorded as a test in `khatago.test.ts` rather than omitted.
@@ -115,6 +157,15 @@ database, which is Tier B and has not run yet.
 
 **The claim protocol has no reaper.** A claimant that dies leaves its row stuck in
 `PROCESSING` forever. Asserted as a test so it cannot quietly stop being true.
+
+**I6 has never fired on a real run.** SEMANTICS F3 requires its liveness bound
+to be _calibrated_ from the corpus and asserted from both sides, precisely
+because "a hand-picked generous N makes I6 vacuous". No calibration exists:
+`livenessBoundN` is hardcoded by every caller and the corpus passes
+`quiesced: false` on every event, so `checkI6` returns on its first line. The
+checker can fire — `invariants.test.ts` proves it against synthetic states —
+but nothing drives it. This is open work, written down rather than left to be
+found; it needs a quiescence phase in the corpus.
 
 ---
 
@@ -175,13 +226,25 @@ CI stays honest without a Postgres service.
 Every figure below is produced by a test in this repository. A CI job greps this
 file for each one and fails if the run does not reproduce it.
 
-- **1,000 seeds** byte-identical, in-process and across a fresh process, against
-  the built artifact
-- **209 tests**
-- **95.8% mutation score** over `src/policy` (158 of 165 mechanical mutants killed)
+- **1,000 seeds** byte-identical for the simulation spine, in-process and across
+  a fresh process, against the built artifact — plus **500 seeds** for the
+  control plane itself, which until this audit had no determinism guard at all
+  (L16)
+- The determinism ban list **watched firing**: every banned construct linted
+  through a fixture, inside the perimeter and outside it (L15)
+- **238 tests**
+- **96.4% mutation score** over `src/policy`
+  (161 of 167 mechanical mutants killed), plus 3 generated mutants excluded
+  because they do not parse — a mutant killed by a syntax error was never a
+  mutant (L19)
 - **16 of 16** semantic mutants caught
-- **2,000 invariant histories**, checked after _every_ event
-- **300 differential histories**
+- **2,000 invariant histories**, checked after _every_ event, and asserted to
+  REACH the regimes they claim to cover — a window boundary, and a slot handed
+  to a second claimant (L13)
+- **300 differential histories**, compared on the rejection _reason_ and not
+  only the admit/reject bit
+- **500 fault-injected control-plane histories** — duplicates, retried timeouts,
+  reordering, delays and pod deaths, checked after every event (L20)
 - **500 KhataGO protocol runs** under the fault injector
 - Fairness: per-tenant caps **1.000×** degradation; global FIFO starves a
   well-behaved tenant outright in **38 of 60** seeds
@@ -192,7 +255,7 @@ file for each one and fails if the run does not reproduce it.
 
 ```
 src/core/      seeded PRNG, virtual clock, event queue, decision log, ordering
-src/sim/       the substrate that lies
+src/sim/       the substrate that lies (driven by test/faultInjection.test.ts)
 src/policy/    the control plane, the replay log, KhataGO's claim protocol
 src/oracle/    invariants, the reference scheduler, the shrinker
 docs/          SEMANTICS · DETERMINISM · LEDGER · MUTATION · FAIRNESS

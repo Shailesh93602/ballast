@@ -8,14 +8,22 @@ import tsPlugin from "@typescript-eslint/eslint-plugin";
  * BALLAST's central claim is that a run is a pure function of its seed. That
  * claim is only worth anything if it is mechanically enforced, so everything
  * that could smuggle in ambient nondeterminism is a build error inside
- * `src/core/**`, `src/policy/**` and `src/oracle/**` — the three trees whose
- * output must be reproducible.
+ * `src/core/**`, `src/policy/**`, `src/oracle/**` and `src/sim/**` — the four
+ * trees whose output must be reproducible. (This comment said "three" while the
+ * config below listed four; `src/sim/**` is inside the perimeter, and the
+ * substrate is precisely where unseeded randomness would do the most damage.)
  *
  * The CLI and the tests are deliberately exempt: the CLI does real file I/O and
- * the determinism guard itself needs to spawn processes.
+ * the determinism guard itself needs to spawn processes. `src/tierb/**` is also
+ * outside — it drives a real Postgres over `pg` and is necessarily async.
  *
  * Each entry names WHY, because a rule whose reason is unstated gets disabled
  * by the next person who hits it.
+ *
+ * WATCHED FIRING by `test/determinismPerimeter.test.ts`, which lints a fixture
+ * of every construct below and asserts it is rejected here and NOT rejected in
+ * the exempt trees. Before that test existed, this list had never rejected
+ * anything (LEDGER L15).
  */
 const DETERMINISM_BANS = [
   {

@@ -29,7 +29,9 @@ function stateOf(plane: ControlPlane, vtime: number): CheckableState {
     claimsGranted: c.claimsGranted,
     releasesDone: c.releasesDone,
     creditsSpent: plane.creditsSpentMap(),
-    creditsExpected: plane.creditsSpentMap(),
+    // The independent recomputation, NOT `creditsSpentMap()` a second time —
+    // aliasing the two made I4 compare a map to itself, so it could not fire.
+    creditsExpected: plane.creditsExpected(),
     slotOwnerToken: new Map(),
     acceptedReleases: c.acceptedReleases,
     replayIds: plane.log.assignedIds(),
@@ -121,6 +123,29 @@ describe("credit (SEMANTICS A1, A2, A3)", () => {
       true,
     );
   });
+
+  it("I4: the independent recomputation is window-scoped, like the counter it checks", () => {
+    // `creditsSpent` resets on every roll, so a recomputation that counts runs
+    // across ALL windows measures a different quantity and I4 fires the moment
+    // a boundary is crossed. It agreed for one reason only: nothing ever
+    // crossed one. Corpus histories topped out at tick 85 against a window of
+    // 100, and the corpus passed `creditsSpentMap()` as both sides of I4.
+    const plane = cp();
+    plane.admit(0, "acme", "w0-a");
+    plane.admit(1, "acme", "w0-b");
+    plane.complete(2, "w0-a", "completed");
+    plane.complete(3, "w0-b", "completed");
+
+    const next = DEFAULT_CONTROL_PLANE.windowTicks + 20;
+    plane.admit(next, "acme", "w1-a");
+
+    expect(plane.creditsSpentMap().get("acme"), "one claim in this window").toBe(1);
+    expect(
+      plane.creditsExpected().get("acme"),
+      "the recomputation must count this window too, not every window ever",
+    ).toBe(1);
+    expect(checkAll(stateOf(plane, next))).toEqual([]);
+  });
 });
 
 describe("leases and fencing (SEMANTICS C1, C2, C4)", () => {
@@ -151,6 +176,107 @@ describe("leases and fencing (SEMANTICS C1, C2, C4)", () => {
       plane.counters.staleReleaseAttempts,
       "the attempt should be counted for observability, but refusing it is correct behaviour, not a violation",
     ).toBeGreaterThan(0);
+  });
+
+  /**
+   * C1/C4 applies to EVERY path that frees a slot, not just `release()`.
+   *
+   * `release()` has always validated the fencing token. `complete()` and
+   * `cancel()` used to free the slot named by `run.slotId` without one — so
+   * after a lease expired and the slot was re-claimed by a different tenant, a
+   * stale complete or cancel evicted the live owner. Nothing caught it: I1 and
+   * I2 only fire when the pool goes OVER its bounds and this pushes it under,
+   * I3 stayed balanced because `releasesDone` was incremented alongside, and I5
+   * was fed only by `release()`, so it never saw these two doors at all.
+   */
+  function twoTenantsOneSlot(): ControlPlane {
+    return new ControlPlane({
+      tenants: [
+        { id: "alice", cap: 2, creditsPerWindow: 100 },
+        { id: "bob", cap: 2, creditsPerWindow: 100 },
+      ],
+      poolCapacity: 1,
+      windowTicks: 100_000,
+      leaseTicks: 10,
+      retentionCount: 64,
+      retentionTicks: 500,
+    });
+  }
+
+  it("C1/C4: a stale COMPLETE must not evict the slot's current owner", () => {
+    const plane = twoTenantsOneSlot();
+    const alice = plane.admit(0, "alice", "A");
+    expect(alice.ok).toBe(true);
+    // Alice's lease runs to t=10. Bob claims the reclaimed slot at t=20.
+    const bob = plane.admit(20, "bob", "B");
+    expect(bob.ok, "bob takes the reclaimed slot").toBe(true);
+    if (!alice.ok || !bob.ok) return;
+    expect(bob.token, "a re-claim issues a new token").toBeGreaterThan(alice.token);
+
+    // Alice's stale release is refused — that path was always fenced.
+    const staleRelease = plane.release(21, alice.slotId, alice.token);
+    expect(staleRelease.ok).toBe(false);
+
+    // The same staleness arriving as a completion must be refused too.
+    const before = plane.counters.staleReleaseAttempts;
+    plane.complete(22, "A", "completed");
+    expect(
+      plane.inFlightByTenant().get("bob"),
+      "bob still holds the slot he legitimately claimed",
+    ).toBe(1);
+    // And the refusal must be RECORDED, not merely performed. Mechanical
+    // mutation found this gap in the fix itself: deleting the counter bump in
+    // `freeSlotOf` changed nothing observable, because the assertions above
+    // only checked that bob kept his slot. A stale claim silently refused is
+    // an operator's only evidence that the fence is load-bearing.
+    expect(
+      plane.counters.staleReleaseAttempts,
+      "a stale completion refused by the fence must be counted, like a stale release",
+    ).toBe(before + 1);
+    expect(
+      plane.release(23, bob.slotId, bob.token).ok,
+      "bob can still release his own slot",
+    ).toBe(true);
+  });
+
+  it("C1/C4: a stale CANCEL must not evict the slot's current owner", () => {
+    const plane = twoTenantsOneSlot();
+    const alice = plane.admit(0, "alice", "A");
+    const bob = plane.admit(20, "bob", "B");
+    expect(alice.ok && bob.ok).toBe(true);
+
+    const before = plane.counters.staleReleaseAttempts;
+    plane.cancel(22, "A");
+    expect(
+      plane.inFlightByTenant().get("bob"),
+      "cancelling a lease-expired run must not free somebody else's slot",
+    ).toBe(1);
+    expect(
+      plane.counters.staleReleaseAttempts,
+      "and the cancel path records its refusal too",
+    ).toBe(before + 1);
+  });
+
+  it("I5 judges every path that frees a slot, not only release()", () => {
+    // Non-vacuity for the fix above: if complete()/cancel() stopped reporting
+    // their releases as facts, I5 would go back to being blind to two thirds
+    // of the surface and this assertion would fail.
+    const plane = cp();
+    const a = plane.admit(0, "acme", "r1");
+    expect(a.ok).toBe(true);
+    expect(plane.counters.acceptedReleases).toHaveLength(0);
+
+    plane.complete(1, "r1", "completed");
+    expect(
+      plane.counters.acceptedReleases,
+      "a completion that frees a slot is a release the checker must see",
+    ).toHaveLength(1);
+
+    const b = plane.admit(2, "globex", "r2");
+    expect(b.ok).toBe(true);
+    plane.cancel(3, "r2");
+    expect(plane.counters.acceptedReleases).toHaveLength(2);
+    expect(checkAll(stateOf(plane, 3)), "all of them are legitimate").toEqual([]);
   });
 
   it("a valid release succeeds and returns the slot to the pool", () => {
@@ -279,6 +405,39 @@ describe("replay log (SEMANTICS E1, E2, E3, E5, E6)", () => {
       false,
     );
     if (!result.ok) expect(result.reason).toBe("retention-exceeded");
+  });
+
+  it("E2: an EMPTIED log must still report retention-exceeded, not 'nothing new'", () => {
+    // The case the partial-eviction test above stepped over. The guard used to
+    // read `cursor < oldestRetained && this.entries.length > 0`, so once
+    // retention had drained the log to nothing the WORST outcome became the
+    // quietest one: a subscriber holding an evicted cursor was told `ok: true,
+    // entries: []` for events it had permanently missed — a hole with no way
+    // to discover it, which is the exact thing E2 exists to forbid.
+    const log = new ReplayLog(1000, 10);
+    for (let i = 0; i < 10; i++) {
+      log.append({ vtime: i, tenant: "t", runId: `r${i}`, outcome: "completed" });
+    }
+    log.evict(100);
+    expect(log.size, "everything has aged out").toBe(0);
+
+    const result = log.readFrom(3, 10);
+    expect(result.ok, "ids 3..10 are gone; saying 'nothing new' is a lie").toBe(false);
+    if (!result.ok) expect(result.reason).toBe("retention-exceeded");
+  });
+
+  it("E2: a FRESH subscriber on an empty log is still served normally", () => {
+    // The other side of the same guard — tightening it must not break the
+    // ordinary case of a subscriber that has simply not missed anything.
+    const log = new ReplayLog(1000, 10_000);
+    const fresh = log.readFrom(1, 10);
+    expect(fresh.ok, "nothing has been evicted, so there is no hole").toBe(true);
+    if (fresh.ok) expect(fresh.entries).toEqual([]);
+
+    log.append({ vtime: 0, tenant: "t", runId: "r0", outcome: "completed" });
+    const after = log.readFrom(1, 10);
+    expect(after.ok).toBe(true);
+    if (after.ok) expect(after.entries).toHaveLength(1);
   });
 
   it("E5: a subscriber at zero credit PAUSES — nothing is dropped", () => {

@@ -100,7 +100,16 @@ export class ReplayLog {
    * which is precisely the failure the replay-id contract exists to prevent.
    */
   readFrom(cursor: ReplayId, limit: number): SubscribeOutcome {
-    if (cursor < this.oldestRetained && this.entries.length > 0) {
+    // NOTE the absent `&& this.entries.length > 0`.
+    //
+    // That clause turned the WORST case into the quiet one: when retention had
+    // evicted the log down to nothing, a subscriber holding an evicted cursor
+    // was answered `ok: true, entries: []` — "nothing new yet" — for events it
+    // had permanently missed. E2 exists to stop exactly that: a hole the
+    // subscriber has no way to discover. `oldestRetained` already handles the
+    // empty case correctly (evict sets it to `nextId`), so a fresh log still
+    // serves a fresh subscriber at cursor 1.
+    if (cursor < this.oldestRetained) {
       return { ok: false, reason: "retention-exceeded" };
     }
     const out: LogEntry[] = [];

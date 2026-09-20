@@ -19,9 +19,20 @@ import { checkAll, type CheckableState } from "../src/oracle/invariants.js";
  * the bugs I did not think of, and the mutation score there is the number worth
  * quoting.
  *
- * Each mutant is expressed as a small broken re-implementation of the specific
- * behaviour, then run against the SAME unchanged checker. If the checker stays
- * silent, the guarantee is not actually guarded.
+ * HOW EACH MUTANT IS EXPRESSED, stated precisely because the looser version of
+ * this sentence hid something. M1–M10 hand-build the `CheckableState` a broken
+ * implementation WOULD produce and assert the unchanged checker complains.
+ * M11–M16 drive the real `ControlPlane` / `ReplayLog`.
+ *
+ * The first group is checker non-vacuity, and that is a different claim from
+ * "the system is guarded". M3 asks *"does I5 catch a stale release if one is
+ * reported?"* — it does — and says nothing about whether the plane reports
+ * every stale release. It did not: `complete()` and `cancel()` freed slots
+ * without a token check and told I5 nothing, and M3 stayed green through all
+ * of it. See LEDGER L10.
+ *
+ * So: a green M1–M10 means the checker can see the failure. Whether the system
+ * ever shows it to the checker is what the corpus and the differential are for.
  */
 
 function baseState(): CheckableState {

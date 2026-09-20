@@ -51,6 +51,27 @@ interface RunState {
   readonly runId: RunId;
   readonly tenant: TenantId;
   slotId: SlotId | null;
+  /**
+   * The fencing token this run was granted when it claimed `slotId`.
+   *
+   * `release()` always validated a token; `complete()` and `cancel()` did not —
+   * they looked the slot up by id and freed it. After a lease expired and the
+   * slot was reclaimed by ANOTHER tenant, a stale complete or cancel therefore
+   * evicted the live owner. That is precisely the failure SEMANTICS C1/C4 and
+   * I5 exist to prevent, arriving through the two doors nobody had put a lock
+   * on. Carrying the token on the run is what lets all three paths ask the same
+   * question: "is this still my slot?"
+   */
+  token: FencingToken;
+  /**
+   * The tumbling window this run spent its credit in — SEMANTICS A1/A3.
+   *
+   * `creditsSpent` resets on every window roll, so an "independent
+   * recomputation" of it that counts runs across ALL windows is not a
+   * recomputation of the same quantity. It agreed only because no corpus
+   * history ever crossed a boundary.
+   */
+  claimedWindow: number;
   status: "admitted" | "completed" | "cancelled";
   /** Set once the effect has been applied — I8's identity. */
   effectApplied: boolean;
@@ -179,8 +200,17 @@ export class ControlPlane {
    * the classic race: two concurrent admits both observe `inFlight = cap - 1`,
    * both conclude there is room, and both claim. Because this simulation is
    * single-threaded the split would not fail *here* — which is exactly why the
-   * mutant that splits them is in the M5 corpus, and why the substrate injects
-   * duplicate and reordered requests to expose it.
+   * mutant that splits them is in the M5 corpus, and why `faultInjection.test.ts`
+   * delivers duplicate and reordered requests to expose it.
+   *
+   * ADMISSION IS IDEMPOTENT PER runId (SEMANTICS A9). Delivery is at-least-once,
+   * so a retried or duplicated admit is routine rather than exotic — and until
+   * the fault injector was connected to this class, it never happened in any
+   * corpus. When it did, I4 fired immediately: the second arrival took a SECOND
+   * slot and spent a SECOND credit for one logical run, while `RunState`
+   * remembered only the second slot, orphaning the first until its lease aged
+   * out. A7 already settled this question for completions; nobody had asked it
+   * of admissions.
    */
   admit(now: number, tenant: TenantId, runId: RunId): AdmitOutcome {
     this.rollWindowIfNeeded(now);
@@ -193,6 +223,28 @@ export class ControlPlane {
     if (existing?.status === "cancelled") {
       // SEMANTICS D1 — the cancel wins a race with the admit.
       return { ok: false, reason: "cancelled-before-start" };
+    }
+    if (existing?.status === "completed") {
+      // SEMANTICS A9 — a runId is single-use. Re-admitting a finished run would
+      // reset `effectApplied` on a fresh RunState, so its effect could be
+      // applied a second time — an I8 violation reachable only through this
+      // door, which is why the answer is a refusal and not a new claim.
+      return { ok: false, reason: "run-already-terminal" };
+    }
+    if (existing !== undefined && existing.slotId !== null) {
+      // A duplicate of a live claim. Echo the grant the caller already holds —
+      // ACKED, not errored, for the same reason E7 acks a duplicate completion:
+      // an error makes an at-least-once sender retry forever. No slot is taken
+      // and no credit moves, because neither was a second time.
+      const slot = this.slots.find((s) => s.id === existing.slotId);
+      if (slot !== undefined) {
+        return {
+          ok: true,
+          slotId: slot.id,
+          token: existing.token,
+          leaseUntil: slot.leaseUntil,
+        };
+      }
     }
 
     // The atomic region begins here. Everything from this point to the slot
@@ -220,6 +272,8 @@ export class ControlPlane {
       runId,
       tenant,
       slotId: free.id,
+      token: free.token,
+      claimedWindow: this.currentWindow,
       status: "admitted",
       effectApplied: false,
     });
@@ -259,14 +313,7 @@ export class ControlPlane {
     }
 
     // Accepted. Record the raw facts and let the checker judge them.
-    const prior = this.releasesThisGeneration.get(slotId) ?? 0;
-    this.acceptedReleases.push({
-      slotId,
-      tokenUsed: token,
-      tokenCurrent: slot.token,
-      priorReleasesOfGeneration: prior,
-    });
-    this.releasesThisGeneration.set(slotId, prior + 1);
+    this.recordAcceptedRelease(slotId, token, slot.token);
 
     // SEMANTICS D5 — the slot returns to the pool and to the tenant's cap in one
     // step. Any window where one has happened and the other has not is a window
@@ -275,6 +322,55 @@ export class ControlPlane {
     this.releasesDone++;
     void now;
     return { ok: true };
+  }
+
+  /**
+   * Record a slot-freeing as a raw fact for I5 to judge.
+   *
+   * EVERY path that frees a claimed slot reports here, not just `release()`.
+   * I5 used to be fed only by `release()`, so `complete()` and `cancel()` —
+   * which also free slots — were outside the checker's field of view entirely.
+   * That is the L1 lesson one level up: it is not enough for the checker to
+   * judge raw facts instead of the plane's self-assessment if the plane still
+   * decides which facts it is shown.
+   */
+  private recordAcceptedRelease(
+    slotId: SlotId,
+    tokenUsed: FencingToken,
+    tokenCurrent: FencingToken,
+  ): void {
+    const prior = this.releasesThisGeneration.get(slotId) ?? 0;
+    this.acceptedReleases.push({
+      slotId,
+      tokenUsed,
+      tokenCurrent,
+      priorReleasesOfGeneration: prior,
+    });
+    this.releasesThisGeneration.set(slotId, prior + 1);
+  }
+
+  /**
+   * Free the slot a run holds, if it still holds it.
+   *
+   * The token comparison is the whole point: a run whose lease expired had its
+   * slot reclaimed and handed to someone else, and `run.slotId` still names
+   * that slot. Freeing by id alone evicts the current owner — an admitted run
+   * loses its capacity with no error anywhere, and I1/I2/I3 all stay green
+   * because the pool moves further UNDER its bounds, never over.
+   */
+  private freeSlotOf(run: RunState): void {
+    if (run.slotId === null) return;
+    const slot = this.slots.find((s) => s.id === run.slotId);
+    if (slot === undefined || slot.tenant === null) return;
+    if (slot.token !== run.token) {
+      // Somebody else owns this slot now. Refusing here is the same decision
+      // `release()` reports as `stale-token` (SEMANTICS C1, C4).
+      this.staleReleaseAttempts++;
+      return;
+    }
+    this.recordAcceptedRelease(slot.id, run.token, slot.token);
+    slot.tenant = null;
+    this.releasesDone++;
   }
 
   // ─── Operation 3: complete ─────────────────────────────────────────────────
@@ -330,13 +426,8 @@ export class ControlPlane {
     // recording the effect. Added as an amendment after the differential oracle
     // caught the gap: the implementation used to hold the slot until an explicit
     // release or lease expiry, so a finished run kept occupying the pool.
-    if (run.slotId !== null) {
-      const slot = this.slots.find((sl) => sl.id === run.slotId);
-      if (slot !== undefined && slot.tenant !== null) {
-        slot.tenant = null;
-        this.releasesDone++;
-      }
-    }
+    // Fenced, like every other path that frees a slot — see `freeSlotOf`.
+    this.freeSlotOf(run);
     const replayId = this.log.append({
       vtime: now,
       tenant: run.tenant,
@@ -357,6 +448,10 @@ export class ControlPlane {
         runId,
         tenant: "",
         slotId: null,
+        // No slot was ever claimed, so there is no token and no window in which
+        // credit was spent. 0 is never a live token — `nextToken` starts at 1.
+        token: 0,
+        claimedWindow: -1,
         status: "cancelled",
         effectApplied: false,
       });
@@ -365,18 +460,22 @@ export class ControlPlane {
     if (run.status === "completed") return "already-complete"; // D2
     if (run.status === "cancelled") return "noop"; // D4
     run.status = "cancelled";
-    if (run.slotId !== null) {
-      const slot = this.slots.find((s) => s.id === run.slotId);
-      if (slot !== undefined && slot.tenant !== null) {
-        slot.tenant = null;
-        this.releasesDone++;
-      }
-    }
+    this.freeSlotOf(run);
     void now;
     return "cancelled";
   }
 
-  /** Independent recomputation of credits, for I4's differential check. */
+  /**
+   * Independent recomputation of credits, for I4's differential check.
+   *
+   * SCOPED TO THE CURRENT WINDOW, because that is what `creditsSpent` measures.
+   * It previously counted every run ever admitted, across all windows — so the
+   * two quantities were only equal before the first boundary. Two things hid
+   * that: the corpus passed `creditsSpentMap()` as BOTH sides of I4, so the
+   * invariant compared a map to itself and could not fire; and no generated
+   * history ever reached tick 100, so the boundary was never crossed even
+   * once. Either mask alone would have been enough. (SEMANTICS A1, A2, A3.)
+   */
   creditsExpected(): ReadonlyMap<TenantId, number> {
     const out = new Map<TenantId, number>();
     for (const t of this.config.tenants) out.set(t.id, 0);
@@ -385,6 +484,7 @@ export class ControlPlane {
     )) {
       if (run.tenant === "") continue;
       if (run.status === "cancelled" && run.slotId === null) continue;
+      if (run.claimedWindow !== this.currentWindow) continue;
       out.set(run.tenant, (out.get(run.tenant) ?? 0) + 1);
     }
     return out;

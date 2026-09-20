@@ -17,10 +17,12 @@ for a correctness argument.
 
 ## Result
 
-- Mutants generated: **165**
-- Killed: **158**
-- Survived: **7**
-- **Mutation score: 95.8%**
+- Mutants generated: **167**
+- Killed: **161**
+- Survived: **6**
+- **Mutation score: 96.4%**
+
+3 further mutant(s) were generated but do not PARSE (deleting the first line of a multi-line statement), and are excluded rather than counted. A mutant killed by a syntax error measures nothing about the suite — the same class of error as L7.
 
 ## Operators
 
@@ -43,12 +45,11 @@ A survivor is not automatically a bug. Triage each into:
 
 | File:line | Operator | Original | Triage |
 | --- | --- | --- | --- |
-| `src/policy/controlPlane.ts:269` | `offbyone:+1` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation cannot happen: release nulls the tenant, so a repeat is refused not-held, and a re-admit resets the generation counter to 0. The counter and I5 are defensive depth against a future change to release() itself. |
-| `src/policy/controlPlane.ts:387` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
-| `src/policy/controlPlane.ts:387` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
-| `src/policy/controlPlane.ts:91` | `delete:statement` | `this.creditsSpent.set(t.id, 0);` | EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and rollWindowIfNeeded re-seeds the map on the first boundary; a missing constructor entry is indistinguishable from an explicit 0. |
-| `src/policy/controlPlane.ts:269` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
-| `src/policy/controlPlane.ts:325` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
-| `src/policy/replayLog.ts:124` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
+| `src/policy/controlPlane.ts:349` | `offbyone:+1` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation cannot happen: release nulls the tenant, so a repeat is refused not-held, and a re-admit resets the generation counter to 0. The counter and I5 are defensive depth against a future change to release() itself. |
+| `src/policy/controlPlane.ts:486` | `cmp:===->!==` | `if (run.status === "cancelled" && run.slotId === null) continue;` | ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and a real tenant cannot exist: cancel-before-admit placeholders carry tenant "" and are skipped a line earlier; admitted runs always hold a slotId. The clause is defensive. |
+| `src/policy/controlPlane.ts:112` | `delete:statement` | `this.creditsSpent.set(t.id, 0);` | EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and rollWindowIfNeeded re-seeds the map on the first boundary; a missing constructor entry is indistinguishable from an explicit 0. |
+| `src/policy/controlPlane.ts:349` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
+| `src/policy/controlPlane.ts:421` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
+| `src/policy/replayLog.ts:133` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
 
 *Generated over 5 source files in `src/policy`.*

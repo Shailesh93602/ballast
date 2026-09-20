@@ -32,6 +32,7 @@ import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join, relative } from "node:path";
+import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -191,13 +192,47 @@ if (!runSuite()) {
   process.exit(1);
 }
 
-const mutants = buildMutants();
+/**
+ * A mutant that does not PARSE was never a mutant.
+ *
+ * The harness scores a mutant KILLED when the suite exits non-zero — and a
+ * syntax error does that before a single assertion runs. `delete:statement`
+ * removes one LINE, so deleting the first line of a multi-line statement
+ * (`this.runs.set(runId, {`) leaves an unbalanced brace, and the resulting
+ * "kill" measures nothing about the test suite at all.
+ *
+ * It was three of 165 here — small, and a 95.8% that quietly includes three
+ * free kills is still the same class of error as L7, where the harness
+ * reported 100% because the suite was already red. The score has to be
+ * measured against mutants that could have survived.
+ */
+function parses(source) {
+  try {
+    esbuild.transformSync(source, { loader: "ts", format: "esm" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const generated = buildMutants();
+const invalid = generated.filter((m) => !parses(m.content));
+const mutants = generated.filter((m) => parses(m.content));
 const selected = QUICK ? mutants.filter((_, i) => i % 4 === 0) : mutants;
 
 console.log(
   `Mutation testing over src/policy — ${selected.length} mutants` +
     (QUICK ? ` (quick: 1 in 4 of ${mutants.length})` : ""),
 );
+if (invalid.length > 0) {
+  console.log(
+    `${invalid.length} generated mutant(s) do not parse and are EXCLUDED rather ` +
+      `than scored as kills:`,
+  );
+  for (const m of invalid) {
+    console.log(`  ${relative(root, m.file)}:${m.line}  ${m.operator}  ${m.original}`);
+  }
+}
 console.log("─".repeat(72));
 
 const survivors = [];
@@ -241,30 +276,37 @@ console.log(`killed ${killed}/${selected.length}   mutation score ${score.toFixe
  * into the generated markdown would be overwritten on the next run, and a triage
  * that disappears is worse than none.
  *
- * Keyed by "file:line:operator". Only `equivalent` belongs here. A survivor that
- * is `uncovered` gets a TEST, not an entry.
+ * KEYED BY THE MUTATED SOURCE LINE, NOT BY LINE NUMBER. The previous key was
+ * `file:line:operator`, which every edit to the file above a triaged site
+ * silently invalidated — and worse, a shifted line could hand a DIFFERENT
+ * mutant an argument written about its former neighbour. Adding six lines to
+ * `admit()` broke all six triage entries at once. The text of the line a
+ * survivor mutates is what the argument is actually about, so that is the key.
+ *
+ * Only `equivalent` / `acceptable` belong here. A survivor that is `uncovered`
+ * gets a TEST, not an entry.
  */
 const TRIAGE = {
-  "src/policy/replayLog.ts:L124:cmp:<=-><":
+  "src/policy/replayLog.ts|cmp:<=-><|if (available <= 0) return []; // paused, not dropping":
     "EQUIVALENT — when `available` is exactly 0, the guarded path calls " +
     "readFrom(cursor, 0), which returns an empty list anyway. Behaviour is " +
     "identical either way; the guard is an early return, not a correctness check.",
-  "src/policy/controlPlane.ts:L91:delete:statement":
+  "src/policy/controlPlane.ts|delete:statement|this.creditsSpent.set(t.id, 0);":
     "EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and " +
     "rollWindowIfNeeded re-seeds the map on the first boundary; a missing " +
     "constructor entry is indistinguishable from an explicit 0.",
-  "src/policy/controlPlane.ts:L269:offbyone:+1":
+  "src/policy/controlPlane.ts|offbyone:+1|this.releasesThisGeneration.set(slotId, prior + 1);":
     "ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation " +
     "cannot happen: release nulls the tenant, so a repeat is refused not-held, " +
     "and a re-admit resets the generation counter to 0. The counter and I5 are " +
     "defensive depth against a future change to release() itself.",
-  "src/policy/controlPlane.ts:L269:delete:statement":
+  "src/policy/controlPlane.ts|delete:statement|this.releasesThisGeneration.set(slotId, prior + 1);":
     "ACCEPTABLE (unreachable) — same argument as the off-by-one at this line.",
-  "src/policy/controlPlane.ts:L325:delete:statement":
+  "src/policy/controlPlane.ts|delete:statement|run.effectApplied = true;":
     "EQUIVALENT — complete() is guarded by the status CAS (early return on " +
     "completed and cancelled), so `effectApplied` can never be consulted " +
     "again on any reachable path; it is belt-and-braces for a refactor.",
-  "src/policy/controlPlane.ts:L387:cmp:===->!==":
+  'src/policy/controlPlane.ts|cmp:===->!==|if (run.status === "cancelled" && run.slotId === null) continue;':
     "ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and " +
     "a real tenant cannot exist: cancel-before-admit placeholders carry " +
     'tenant "" and are skipped a line earlier; admitted runs always hold a ' +
@@ -272,7 +314,7 @@ const TRIAGE = {
 };
 
 function triageFor(s) {
-  const key = `${relative(root, s.file)}:L${s.line}:${s.operator}`;
+  const key = `${relative(root, s.file)}|${s.operator}|${s.original}`;
   return TRIAGE[key] ?? null;
 }
 
@@ -300,6 +342,13 @@ const report = [
   `- Killed: **${killed}**`,
   `- Survived: **${survivors.length}**`,
   `- **Mutation score: ${score.toFixed(1)}%**`,
+  "",
+  invalid.length === 0
+    ? "Every generated mutant parsed, so every one of them could have survived."
+    : `${invalid.length} further mutant(s) were generated but do not PARSE ` +
+      "(deleting the first line of a multi-line statement), and are excluded " +
+      "rather than counted. A mutant killed by a syntax error measures nothing " +
+      "about the suite — the same class of error as L7.",
   "",
   "## Operators",
   "",

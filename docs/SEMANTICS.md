@@ -115,6 +115,45 @@ CAS that makes the effect exactly-once.
 diverges from reality in proportion to network flakiness.
 **Guards** I4, I8. **Status: `DECIDED`**
 
+### A8 · What exactly is I4's "expected" side recomputing?
+
+**→ Credits claimed in the CURRENT window**, which is what the counter it checks
+measures.
+**Else** a recomputation that counts every run ever admitted measures a
+different quantity, and the two agree only until the first window boundary. It
+went unnoticed because the corpus supplied the same object for both sides of I4
+and no generated history ever reached tick 100 — two independent masks, either
+sufficient on its own. See LEDGER L11, L12, L13.
+**Known cost:** the recomputation is O(runs) per check rather than O(1), which
+is the point — an oracle that shares the implementation's incremental state
+shares its bugs.
+**Guards** I4. **Status: `DECIDED`** — _added after the audit; see Amendments._
+
+### A9 · Is admission idempotent per `runId`?
+
+**→ Yes.** A second admit for a run that is still live echoes the grant the
+caller already holds — same slot, same token — and takes no slot and spends no
+credit. An admit for a run that has already COMPLETED is refused with
+`run-already-terminal`: an identity is single-use.
+**Else, treating each arrival as a fresh claim:** delivery is at-least-once, so
+a retried admit is routine. Each retry then takes a second slot and spends a
+second credit for one logical run, while `RunState` remembers only the last —
+orphaning the earlier slot until its lease ages out. A7 settled exactly this
+question for completions; it was never asked of admissions, and the gap was
+invisible because no corpus generated a duplicate `runId` until the fault
+injector was connected to the control plane (LEDGER L20, L21).
+**Else, erroring on the duplicate:** an at-least-once sender retries forever.
+E7 makes the same argument for completions.
+**Else, allowing a completed id to be re-admitted:** a fresh `RunState` resets
+`effectApplied`, so the effect for that identity can be applied a second time.
+That is an I8 violation reachable through this door and no other.
+**Known cost, stated deliberately:** `runs` is never pruned, so a single-use
+identity means the map grows with the number of runs ever seen. That is already
+true of the existing implementation; A9 makes it load-bearing rather than
+incidental.
+**Guards** I1, I4, I8. **Status: `DECIDED`** — _added after the audit; see
+Amendments._
+
 ---
 
 ## B. Caps and admission
@@ -208,11 +247,16 @@ is not a test at all.
 
 ### C4 · Can a lease be renewed, and does renewal re-validate the token?
 
-**→ Renewal exists, and it re-validates.** A renewal from a stale token is
-rejected.
+**→ Renewal would re-validate.** A renewal from a stale token is rejected.
 **Else** renewal becomes a way to launder a stale claim back into a live one,
 which silently undoes C1.
-**Guards** I5. **Status: `DECIDED`**
+🔴 **NOT IMPLEMENTED, and this row said otherwise for five weeks.** The surface
+is three operations — `admit`, `release`, `complete` — and there is no `renew`.
+The row read "Renewal exists" beside a `DECIDED` status, so a reader checking
+the spec against the code found a guarantee with nothing behind it. The decision
+stands as the answer _if_ renewal is added; what is corrected here is the claim
+that it had been.
+**Guards** I5. **Status: `DECIDED` (unimplemented — see the note above)**
 
 ### C5 · What reclaims an expired lease — a sweeper, or the next claimant?
 
@@ -223,6 +267,22 @@ system single-decision-maker, which is what makes the reference model tractable.
 **Known cost:** a slot can sit expired-but-unreclaimed while nobody is asking for
 capacity. This is invisible externally and is accepted.
 **Guards** I3, I6. **Status: `DECIDED`**
+
+### C6 · A run whose lease expired is later completed or cancelled. Does that free the slot it used to hold?
+
+**→ No, unless it is still the same claim.** Every path that frees a slot
+compares the run's fencing token against the slot's current one; a mismatch is
+refused exactly as `release()` refuses it.
+**Else** `complete()` and `cancel()` free the slot named by `run.slotId`, which
+after a reclaim belongs to someone else — so a stale claimant evicts a live
+tenant's capacity. The damage is invisible to I1 and I2, which only fire when
+the pool goes OVER its bounds, and to I3, which stays balanced because the
+release is counted.
+**This row exists because it was resolved silently and wrongly.** C1 and C4 are
+about `release()`, and nobody asked the same question of the other two doors.
+See LEDGER L10.
+**Guards** I1, I2, I5. **Status: `DECIDED`** — _added after the audit that found
+L10; see the Amendments section._
 
 ---
 
@@ -363,7 +423,16 @@ refused", which makes the fairness measurement in M7 uninterpretable.
 max must be ≤ N, **and** ≥ 0.5·N.
 **Else** a hand-picked generous N makes I6 vacuous — it passes because it can
 never fail, which is worse than not having it.
-**Guards** I6. **Status: `DECIDED`**
+🔴 **NOT IMPLEMENTED — and the `Else` clause is what actually happened.** No
+calibration exists anywhere. Every caller hardcodes `livenessBoundN` as 50 or
+100, and the 2,000-history corpus passes `quiesced: false` on every event, so
+`checkI6` returns on its first line and I6 never fires outside the synthetic
+non-vacuity states in `invariants.test.ts`. The checker can fire; nothing drives
+it. Fixing this needs a quiescence phase in the corpus — drain the workload,
+measure the observed max drain time, and assert N from both sides — which is
+larger than the audit that found it, and is recorded here rather than left to be
+discovered.
+**Guards** I6. **Status: `DECIDED` (uncalibrated — see the note above)**
 
 ### F4 · Does the simulation ever report wall-clock time?
 
@@ -420,4 +489,17 @@ changes to `FROZEN`. After that, amendments are appended below, never edited in.
 
 ## Amendments
 
-_(none yet)_
+The rule at the top of this file is that a frozen row is never edited in place —
+an appended, dated row is the thing git ordering makes credible. The file is
+still `DRAFT`, so editing has been legal; the log below exists so that the
+edits are visible without reading `git log -p`, which is the only reason the
+rule was written.
+
+| Date       | Row    | What changed                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-08-16 | **B6** | Added — completion is terminal and frees capacity. Written **after** `src/policy/` existed, in commit `2bc4055` (M4), in response to the differential catching the gap (L2). It was inserted into section B rather than logged here, so the file read as if all 37 original rows were pre-implementation. They were: `3dc64c8` (SEMANTICS.md) is an ancestor of `c9ebbd5` (the control plane). B6 is the one row that is not, and it now says so here. |
+| 2026-09-20 | **C4** | Corrected — the row asserted that lease renewal "exists". There is no `renew` operation. The recommendation stands; the claim that it was implemented did not.                                                                                                                                                                                                                                                                                         |
+| 2026-09-20 | **C6** | Added — the fencing token applies to every path that frees a slot, not only `release()`. Resolved silently and wrongly until the audit (L10).                                                                                                                                                                                                                                                                                                          |
+| 2026-09-20 | **A8** | Added — I4's "expected" side is scoped to the current window (L11, L12, L13).                                                                                                                                                                                                                                                                                                                                                                          |
+| 2026-09-20 | **A9** | Added — admission is idempotent per `runId`, and a completed id is not re-admissible. Found by connecting the fault injector to the control plane, which immediately fired I4 (L20, L21).                                                                                                                                                                                                                                                              |
+| 2026-09-20 | **F3** | Corrected — the calibration this row requires does not exist; `livenessBoundN` is hardcoded and the corpus never quiesces, so I6 is the vacuous invariant F3's own `Else` clause warns about. Open work, not a fix.                                                                                                                                                                                                                                    |
