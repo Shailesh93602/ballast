@@ -471,10 +471,6 @@ const TRIAGE = {
     "EQUIVALENT — when `available` is exactly 0, the guarded path calls " +
     "readFrom(cursor, 0), which returns an empty list anyway. Behaviour is " +
     "identical either way; the guard is an early return, not a correctness check.",
-  "src/policy/controlPlane.ts|delete:statement|this.creditsSpent.set(t.id, 0);":
-    "EQUIVALENT — every read of creditsSpent is `get(tenant) ?? 0` and " +
-    "rollWindowIfNeeded re-seeds the map on the first boundary; a missing " +
-    "constructor entry is indistinguishable from an explicit 0.",
   "src/policy/controlPlane.ts|offbyone:+1|this.releasesThisGeneration.set(slotId, prior + 1);":
     "ACCEPTABLE (unreachable) — a second ACCEPTED release of one generation " +
     "cannot happen: release nulls the tenant, so a repeat is refused not-held, " +
@@ -486,11 +482,6 @@ const TRIAGE = {
     "EQUIVALENT — complete() is guarded by the status CAS (early return on " +
     "completed and cancelled), so `effectApplied` can never be consulted " +
     "again on any reachable path; it is belt-and-braces for a refactor.",
-  'src/policy/controlPlane.ts|cmp:===->!==|if (run.status === "cancelled" && run.slotId === null) continue;':
-    "ACCEPTABLE (unreachable) — a run with status cancelled, slotId null and " +
-    "a real tenant cannot exist: cancel-before-admit placeholders carry " +
-    'tenant "" and are skipped a line earlier; admitted runs always hold a ' +
-    "slotId. The clause is defensive.",
 };
 
 function triageFor(s) {

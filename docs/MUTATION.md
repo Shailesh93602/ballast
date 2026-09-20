@@ -18,9 +18,9 @@ for a correctness argument.
 ## Result
 
 - Mutants generated: **362**
-- Killed: **338**
-- Survived: **24**
-- **Mutation score: 93.4%**
+- Killed: **352**
+- Survived: **10**
+- **Mutation score: 97.2%**
 
 ### By scope
 
@@ -31,8 +31,8 @@ recurring failure, not a lesser version of it.
 
 | Scope | Killed | Total | Score |
 | --- | --- | --- | --- |
-| `src/core` | 70 | 77 | 90.9% |
-| `src/oracle` | 104 | 117 | 88.9% |
+| `src/core` | 70 | 74 | 94.6% |
+| `src/oracle` | 118 | 120 | 98.3% |
 | `src/policy` | 164 | 168 | 97.6% |
 
 3 further mutant(s) were generated but do not PARSE (deleting the first line of a multi-line statement), and are excluded rather than counted. A mutant killed by a syntax error measures nothing about the suite — the same class of error as L7.
@@ -70,26 +70,12 @@ A survivor is not automatically a bug. Triage each into:
 | `src/policy/controlPlane.ts:393` | `delete:statement` | `this.releasesThisGeneration.set(slotId, prior + 1);` | ACCEPTABLE (unreachable) — same argument as the off-by-one at this line. |
 | `src/policy/controlPlane.ts:465` | `delete:statement` | `run.effectApplied = true;` | EQUIVALENT — complete() is guarded by the status CAS (early return on completed and cancelled), so `effectApplied` can never be consulted again on any reachable path; it is belt-and-braces for a refactor. |
 | `src/policy/replayLog.ts:163` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
-| `src/oracle/invariants.ts:232` | `offbyone:+1` | `detail: `slot ${r.slotId} was released ${r.priorReleasesOfGeneration + 1} times in one gen` | **UNTRIAGED — write a test** |
-| `src/oracle/invariants.ts:252` | `cmp:<=-><` | `if (s.ticksSinceQuiesce <= s.livenessBoundN) return [];` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:345` | `cmp:===->!==` | `return world.status.get(ev.runId) === "held"` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:350` | `cmp:===->!==` | `if (st === "completed")` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:350` | `bool:negate-if` | `if (st === "completed")` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:352` | `cmp:===->!==` | `if (st === "held") return { kind: "completed", runId: ev.runId, duplicate: false };` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:352` | `bool:negate-if` | `if (st === "held") return { kind: "completed", runId: ev.runId, duplicate: false };` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:357` | `cmp:===->!==` | `if (st === "completed") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:357` | `bool:negate-if` | `if (st === "completed") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:358` | `cmp:===->!==` | `if (st === "cancelled") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
-| `src/oracle/reference.ts:358` | `bool:negate-if` | `if (st === "cancelled") return { kind: "noop", runId: ev.runId };` | **UNTRIAGED — write a test** |
-| `src/oracle/shrink.ts:92` | `offbyone:-1` | `granularity = Math.max(granularity - 1, 2);` | **UNTRIAGED — write a test** |
-| `src/oracle/shrink.ts:92` | `delete:statement` | `granularity = Math.max(granularity - 1, 2);` | **UNTRIAGED — write a test** |
-| `src/core/clock.ts:39` | `cmp:===->!==` | `return this.heap.length === 0;` | **UNTRIAGED — write a test** |
-| `src/core/order.ts:68` | `cmp:!==->===` | `if (d !== 0) return d;` | **UNTRIAGED — write a test** |
-| `src/core/order.ts:68` | `bool:negate-if` | `if (d !== 0) return d;` | **UNTRIAGED — write a test** |
-| `src/core/rng.ts:97` | `cmp:>=->>` | `while (draw >= limit) draw = this.next64();` | **UNTRIAGED — write a test** |
-| `src/core/rng.ts:103` | `cmp:<=-><` | `if (p <= 0) return false;` | **UNTRIAGED — write a test** |
-| `src/core/rng.ts:104` | `cmp:>=->>` | `if (p >= 1) return true;` | **UNTRIAGED — write a test** |
-| `src/core/rng.ts:124` | `offbyone:-1` | `return weights.length - 1;` | **UNTRIAGED — write a test** |
+| `src/oracle/shrink.ts:92` | `offbyone:-1` | `granularity = Math.max(granularity - 1, 2);` | ACCEPTABLE (cost, not result) — ddmin's granularity schedule controls how many candidates the search evaluates, not which minimal input it converges on. Both this and the deletion below leave granularity higher after a successful reduction, so the search does more work; the S2 1-minimality test still passes, which is the evidence for the claim rather than the assertion of it. |
+| `src/oracle/shrink.ts:92` | `delete:statement` | `granularity = Math.max(granularity - 1, 2);` | ACCEPTABLE (cost, not result) — same argument as the off-by-one at this line. |
+| `src/core/rng.ts:97` | `cmp:>=->>` | `while (draw >= limit) draw = this.next64();` | ACCEPTABLE (not distinguishable) — `limit` is the largest multiple of `range` that fits in 64 bits, and the loop rejects draws at or above it so every residue is equally likely. The mutant additionally ACCEPTS `draw === limit`: one value in 2**64, biasing a single residue by 2**-64. No test can separate that from the original without ~2**64 draws, so it is reported rather than papered over with a test that would not really kill it. |
+| `src/core/rng.ts:103` | `cmp:<=-><` | `if (p <= 0) return false;` | EQUIVALENT — `nextFloat()` is `Number(next64() >> 11n) / 2**53`, so it lies in [0, 1). With p = 0 the mutant falls through to `nextFloat() < 0`, which is false for every draw: the same answer the guard gives. The guard is an early return, not a correctness check. |
+| `src/core/rng.ts:104` | `cmp:>=->>` | `if (p >= 1) return true;` | EQUIVALENT — the same argument at the other end. The maximum of `nextFloat()` is (2**53 - 1) / 2**53, so with p = 1 the mutant falls through to `nextFloat() < 1`, which is true for every draw. |
+| `src/core/rng.ts:124` | `offbyone:-1` | `return weights.length - 1;` | ACCEPTABLE (unreachable) — the loop returns as soon as `target < 0`, and `target` starts below `total`, so the final line is a defensive clamp reached only if floating-point residue leaves `target >= 0` after every weight has been subtracted. The mutant turns that clamp into an out-of-range index; the line it breaks is one nothing in the corpus reaches. |
 
 *Generated over 14 source files in `src/policy`, `src/oracle`, `src/core`.*
 

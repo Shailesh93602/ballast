@@ -206,7 +206,12 @@ describe("killing mutation survivors — credit accounting", () => {
     d.cancel(1, "r3-never-admitted");
 
     const spent = d.plane.creditsSpentMap(1);
-    const expected = referenceCreditsSpent(DEFAULT_CONTROL_PLANE, d.history, d.history.length - 1, 1);
+    const expected = referenceCreditsSpent(
+      DEFAULT_CONTROL_PLANE,
+      d.history,
+      d.history.length - 1,
+      1,
+    );
 
     // Two accepted admits for acme -> two credits, by both routes.
     expect(spent.get("acme")).toBe(2);

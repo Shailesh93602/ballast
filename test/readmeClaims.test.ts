@@ -143,7 +143,10 @@ describe("README numbers are reproducible", () => {
       { label: "500 KhataGO protocol runs", needle: /seed <= 500/ },
       { label: "60 fairness seeds", needle: /seed <= 60/ },
       { label: "200 quiescence seeds", needle: /SEEDS = 200/ },
-      { label: "9 precedence overlap scenarios", needle: /const SCENARIOS: Scenario\[\]/ },
+      {
+        label: "9 precedence overlap scenarios",
+        needle: /const SCENARIOS: Scenario\[\]/,
+      },
     ];
     const missing = corpusClaims
       .filter((c) => !c.needle.test(sources))

@@ -179,3 +179,44 @@ describe("an interrupted campaign cannot be silent", () => {
     expect(src).toMatch(/process\.on\("SIGTERM"/);
   });
 });
+
+describe("triage notes cannot outlive the code they argue about", () => {
+  /**
+   * A survivor that is EQUIVALENT or ACCEPTABLE gets an argument, keyed by the
+   * source line it mutates. Delete or rewrite that line and the argument is
+   * still sitting there, addressed to nothing — and the next reader has no way
+   * to tell a live justification from an obsolete one.
+   *
+   * That already happened in this round: removing `creditsExpected()` orphaned
+   * the note about `run.status === "cancelled" && run.slotId === null`. It was
+   * caught by eye, which is not a method.
+   */
+  const harness = readFileSync(join(root, "scripts", "mutate.mjs"), "utf8");
+
+  function triageKeys(): Array<{ file: string; op: string; line: string }> {
+    const block = /const TRIAGE = \{([\s\S]*?)\n\};/.exec(harness);
+    expect(block, "mutate.mjs must define a TRIAGE map").not.toBeNull();
+    return [
+      ...(block?.[1] ?? "").matchAll(/^\s*["']([^"']+\.ts)\|([^|]+)\|(.+?)["']:/gm),
+    ].map((m) => ({ file: m[1] as string, op: m[2] as string, line: m[3] as string }));
+  }
+
+  it("finds the triage entries at all — a parse that matches nothing proves nothing", () => {
+    expect(triageKeys().length).toBeGreaterThan(5);
+  });
+
+  it("every triage entry names a line that still exists in that file", () => {
+    const orphans = triageKeys().filter(({ file, line }) => {
+      const src = readFileSync(join(root, file), "utf8");
+      // The key stores the line TRIMMED and truncated to 90 chars, so compare
+      // against each trimmed source line by prefix rather than by equality.
+      return !src
+        .split("\n")
+        .some((l) => l.trim().startsWith(line.slice(0, 60).replace(/\\"/g, '"')));
+    });
+    expect(
+      orphans.map((o) => `${o.file}|${o.op}|${o.line.slice(0, 50)}`),
+      "triage arguments addressed to code that no longer exists",
+    ).toEqual([]);
+  });
+});

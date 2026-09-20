@@ -295,16 +295,18 @@ file for each one and fails if the run does not reproduce it.
   (L16)
 - The determinism ban list **watched firing**: every banned construct linted
   through a fixture, inside the perimeter and outside it (L15)
-- **286 tests**
-- **93.4% mutation score** over `src/policy`, `src/oracle` **and** `src/core`
-  (338 of 362 mechanical mutants killed), plus 3 generated mutants excluded
+- **288 tests**
+- **97.2% mutation score** over `src/policy`, `src/oracle` **and** `src/core`
+  (352 of 362 mechanical mutants killed), plus 3 generated mutants excluded
   because they do not parse — a mutant killed by a syntax error was never a
-  mutant (L19), and 0 excluded as inconclusive, which is what a mutant killed by
-  a **timeout** would have been scored as before (L27). The headline went DOWN
-  when the oracles and the core were brought into scope, which is the point: the
-  layer with the worst track record in `LEDGER.md` was the one layer nothing was
-  allowed to mutate. Per scope, so the two numbers are not averaged into one:
-  `src/policy` 97.6%, `src/core` 90.9%, `src/oracle` 88.9%
+  mutant (L19) — and 0 excluded as inconclusive, which is what a mutant killed
+  by a **timeout** would now be scored as (L27). Reported per scope rather than
+  averaged into one number, because they mean different things: `src/oracle`
+  98.3%, `src/policy` 97.6%, `src/core` 94.6%. **The first run over the wider
+  scope was 93.4%**, and the drop was the useful part — nine of the survivors
+  were in `referenceDecision`, which is how L28 was found. Every one of the ten
+  remaining survivors carries a written argument in
+  [`MUTATION.md`](docs/MUTATION.md); none is marked `uncovered`
 - **16 of 16** semantic mutants caught
 - **2,000 invariant histories**, checked after _every_ event, and asserted to
   REACH the regimes they claim to cover — a window boundary, and a slot handed
