@@ -172,7 +172,7 @@ function buildMutants() {
 }
 
 /**
- * Run some test files. Returns "pass", "fail" or "timeout".
+ * Run some test files. Returns { verdict, output }.
  *
  * "timeout" IS NOT A KILL. A mutant is judged killed when the suite fails an
  * assertion; a suite that failed because a process-spawning test ran out of
@@ -181,65 +181,65 @@ function buildMutants() {
  * mutant killed by an already-red suite): a kill that measures nothing, in the
  * direction that flatters the score (LEDGER L27).
  */
-function runFiles(files) {
+function runFiles(files, extraArgs = []) {
   try {
-    execFileSync("npx", ["vitest", "run", "--reporter=dot", ...files], {
+    const output = execFileSync("npx", ["vitest", "run", ...extraArgs, ...files], {
       cwd: root,
       stdio: "pipe",
       encoding: "utf8",
       timeout: 300_000,
     });
-    return "pass";
+    return { verdict: "pass", output };
   } catch (err) {
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    if (/Test timed out in \d+ms/.test(out) || err.killed === true) return "timeout";
-    return "fail";
+    const output = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    if (/Test timed out in \d+ms/.test(output) || err.killed === true) {
+      return { verdict: "timeout", output };
+    }
+    return { verdict: "fail", output };
   }
 }
 
-const runSuite = () => runFiles(SUITE_FILES);
-
 /**
- * WHAT EACH TEST FILE COSTS, MEASURED ONCE — not guessed, and not a hand list.
+ * GRADING ONE MUTANT: cheapest file first, stop at the first failure.
  *
- * A mutant is killed the moment ANY graded file fails, so the campaign only has
- * to keep running files while they keep passing. Ordering them cheapest-first
- * and stopping at the first failure turns the common case — a mutant killed by
- * a fast unit test — from "run everything that can see it" into "run one file".
+ * A mutant is killed the moment ANY graded file fails, so once one has failed
+ * the rest could only agree with it. `--bail=1` with `--no-file-parallelism`
+ * makes vitest stop there, and running the cheap unit files before the
+ * expensive corpora means the common case — a mutant killed by a fast unit
+ * test — costs one file instead of fifteen. Measured on this suite: a killed
+ * mutant goes from ~7s to ~0.8s of test time.
  *
- * The ordering is calibrated at startup rather than written down, for the same
- * reason the exclusion set is computed rather than listed: a hand-maintained
- * order goes stale the moment a file gets slower, and nothing would say so.
- * It costs one run per file, once.
+ * `reachesFile` narrows it further: a test that cannot reach the mutated module
+ * through any chain of local imports cannot observe the mutation.
  *
- * This changes what is RUN, never what is CONCLUDED: the files skipped after a
- * failure could only have agreed with it, since one failure is already a kill.
- */
-function calibrate() {
-  const cost = new Map();
-  for (const f of SUITE_FILES) {
-    const t0 = Date.now();
-    runFiles([f]);
-    cost.set(f, Date.now() - t0);
-  }
-  return cost;
-}
-
-/**
- * Grade one mutant: cheapest-first, short-circuiting on the first failure, and
- * only against files that can REACH the mutated module at all.
+ * This changes what is RUN, never what is CONCLUDED.
  */
 function judge(mutatedFile, cost) {
   const files = SUITE_FILES.filter((f) => reachesFile(f, mutatedFile)).sort(
     (a, b) => (cost.get(a) ?? 0) - (cost.get(b) ?? 0),
   );
-  let sawTimeout = false;
-  for (const f of files) {
-    const verdict = runFiles([f]);
-    if (verdict === "fail") return "fail";
-    if (verdict === "timeout") sawTimeout = true;
+  if (files.length === 0) return "pass";
+  return runFiles(files, ["--reporter=dot", "--no-file-parallelism", "--bail=1"]).verdict;
+}
+
+/**
+ * WHAT EACH TEST FILE COSTS, MEASURED — not guessed, and not a hand list.
+ *
+ * Parsed out of one ordinary run of the graded suite, so it costs nothing extra
+ * and it measures the number that matters: time spent RUNNING the file, not the
+ * four seconds of npx and vite startup that dominate a standalone invocation
+ * and would rank the files almost at random.
+ *
+ * Calibrated rather than written down for the same reason the exclusion set is
+ * computed: a hand-maintained order goes stale the moment a file gets slower,
+ * and nothing would say so.
+ */
+function parseFileCosts(output) {
+  const cost = new Map();
+  for (const m of output.matchAll(/([\w./-]+\.test\.ts) \(\d+ tests?\)\s+(\d+)ms/g)) {
+    cost.set(join(root, m[1]), Number(m[2]));
   }
-  return sawTimeout ? "timeout" : "pass";
+  return cost;
 }
 
 /**
@@ -253,7 +253,8 @@ function judge(mutatedFile, cost) {
  * and the run reported 100% while genuinely surviving mutants went unnoticed.
  * The number that should have raised an alarm was the reassuring one.
  */
-if (runSuite() !== "pass") {
+const baseline = runFiles(SUITE_FILES, ["--reporter=basic"]);
+if (baseline.verdict !== "pass") {
   console.error(
     [
       "REFUSING TO RUN: the test suite fails before any mutation is applied.",
@@ -309,8 +310,8 @@ if (invalid.length > 0) {
     console.log(`  ${relative(root, m.file)}:${m.line}  ${m.operator}  ${m.original}`);
   }
 }
-console.log("calibrating per-file cost (one run each, once) …");
-const FILE_COST = calibrate();
+const FILE_COST = parseFileCosts(baseline.output);
+console.log("per-file cost, parsed from the baseline run (cheapest graded first):");
 for (const [f, ms] of [...FILE_COST].sort((a, b) => a[1] - b[1])) {
   console.log(`  ${String(ms).padStart(6)}ms  ${relative(root, f)}`);
 }

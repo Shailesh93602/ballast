@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
 import { Rng } from "../src/core/rng.js";
 import { Substrate, DEFAULT_SUBSTRATE } from "../src/sim/substrate.js";
@@ -96,6 +99,12 @@ interface Drain {
 }
 
 const DRAIN_CEILING = 500;
+
+/** A doc, whitespace-collapsed, so an assertion never depends on line wrapping. */
+function readDoc(rel: string): string {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return readFileSync(join(root, rel), "utf8").replace(/\s+/g, " ");
+}
 
 function runToQuiescence(seed: number, boundN: number): Drain {
   const rng = new Rng(seed);
@@ -218,6 +227,57 @@ describe("quiescence — the corpus that makes I6 fire", () => {
       tooTight.violations.filter((v) => v.startsWith("I6")).length,
       "a liveness bound of 1 tick must produce I6 violations on a real drain",
     ).toBeGreaterThan(0);
+  });
+
+  it("every quiescence figure in the docs is one this run produced", () => {
+    // Every number in README.md must be DERIVED. This repository has found a
+    // figure stated in a document and produced by nothing three times — the
+    // test count, "38 of 60", and the three CLI hashes — so a freshly measured
+    // calibration is exactly the sort of thing that is true today and quoted
+    // forever.
+    //
+    // POSITIVE AND NEGATIVE, both BUILT FROM the measurement. Asserting only
+    // that the docs contain the right number leaves every OTHER occurrence
+    // unguarded, and this figure is already written in two places. That is the
+    // precise mistake this workspace had to correct once before, when a guard
+    // imported the constant for its positive assertion and hardcoded the same
+    // value inside its negative one — so it asserted "no count other than 202"
+    // against files that still said 202, and stayed green for four days.
+    const docs = [readDoc("README.md"), readDoc("docs/SEMANTICS.md")].join(" ");
+
+    const quiesced = [...docs.matchAll(/(\d+)(?: of \d+| of them)? reach quiescence/g)];
+    expect(quiesced.length, "the figure must appear at all").toBeGreaterThan(1);
+    expect(
+      quiesced.map((m) => Number(m[1])).filter((n) => n !== withOrphans),
+      `a quiescence count no run produces — this corpus measures ${withOrphans}`,
+    ).toEqual([]);
+
+    const drains = [...docs.matchAll(/longest drain is \*{0,2}(\d+) ticks/g)];
+    expect(drains.length, "the drain must be quoted").toBeGreaterThan(0);
+    expect(
+      drains.map((m) => Number(m[1])).filter((n) => n !== observedMax),
+      `a drain figure no run produces — this corpus measures ${observedMax}`,
+    ).toEqual([]);
+
+    expect(docs, "the corpus size must be quoted too").toContain(
+      `**${SEEDS} quiescence seeds**`,
+    );
+  });
+
+  it("SEMANTICS F3 states the bound AND both sides of its own test", () => {
+    // The row is what an interviewer reads. A bound quoted without the two
+    // inequalities that constrain it is just a number again.
+    const doc = readDoc("docs/SEMANTICS.md");
+    expect(doc).toContain(`**${withOrphans} of ${SEEDS} reach quiescence`);
+    expect(doc).toContain(`**${observedMax} ticks**`);
+    expect(doc).toContain(`**${LIVENESS_BOUND_N}**`);
+    expect(doc, "both sides of F3 must be stated, not just the bound").toContain(
+      `${observedMax} \u2264 ${LIVENESS_BOUND_N}, and ${observedMax} \u2265 ${LIVENESS_BOUND_N / 2}`,
+    );
+    expect(
+      readDoc("README.md"),
+      "and the README must quote the same derived bound",
+    ).toContain(`N is computed as **${LIVENESS_BOUND_N}**`);
   });
 
   it("I6 catches capacity that is genuinely orphaned, not merely slow", () => {

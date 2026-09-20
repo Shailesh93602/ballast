@@ -114,7 +114,7 @@ describe("the harness refuses to report a meaningless number", () => {
 
   it("still refuses to run against an already-red suite (L7)", () => {
     expect(src).toContain("REFUSING TO RUN");
-    expect(src).toMatch(/runSuite\(\) !== "pass"/);
+    expect(src).toMatch(/baseline\.verdict !== "pass"/);
   });
 
   it("excludes mutants that do not parse rather than scoring them killed (L19)", () => {
@@ -122,12 +122,25 @@ describe("the harness refuses to report a meaningless number", () => {
     expect(src).toMatch(/const mutants = generated\.filter/);
   });
 
+  it("grades cheapest-first and stops at the first failure", () => {
+    // A mutant is killed the moment any graded file fails, so the rest could
+    // only agree. Without bail the campaign runs every reachable file for every
+    // mutant — hours of suites whose verdict is already decided.
+    expect(src, "the run must bail at the first failing file").toContain("--bail=1");
+    expect(src, "bail is meaningless if files run in parallel").toContain(
+      "--no-file-parallelism",
+    );
+    expect(src, "the order must come from a measurement, not a list").toMatch(
+      /parseFileCosts/,
+    );
+  });
+
   it("does not count a TIMEOUT as a kill", () => {
     // New in this round, and the same class as L7 and L19: the suite grew
     // heavy enough that process-spawning tests began timing out under load,
     // and every one of those would have been scored as a kill. A mutant killed
     // by a stopwatch measures nothing about the suite.
-    expect(src).toMatch(/return "timeout"/);
+    expect(src).toMatch(/verdict: "timeout"/);
     expect(src, "a timed-out run must be retried before being written off").toMatch(
       /if \(verdict === "timeout"\) verdict = judge\(/,
     );
