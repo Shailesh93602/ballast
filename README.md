@@ -295,7 +295,7 @@ file for each one and fails if the run does not reproduce it.
   (L16)
 - The determinism ban list **watched firing**: every banned construct linted
   through a fixture, inside the perimeter and outside it (L15)
-- **288 tests**
+- **291 tests**
 - **97.2% mutation score** over `src/policy`, `src/oracle` **and** `src/core`
   (352 of 362 mechanical mutants killed), plus 3 generated mutants excluded
   because they do not parse — a mutant killed by a syntax error was never a
