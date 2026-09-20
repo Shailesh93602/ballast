@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { ControlPlane } from "../src/policy/controlPlane.js";
 import { DEFAULT_CONTROL_PLANE, type ControlPlaneConfig } from "../src/policy/types.js";
-import { ReplayLog } from "../src/policy/replayLog.js";
-import { checkAll, type CheckableState } from "../src/oracle/invariants.js";
+import { ReplayLog, type SubscriberState } from "../src/policy/replayLog.js";
+import { checkAll } from "../src/oracle/invariants.js";
+import { DrivenPlane } from "./support/planeHarness.js";
 
 /**
  * Control-plane behaviour, asserted against docs/SEMANTICS.md.
@@ -17,30 +18,25 @@ function cp(overrides: Partial<ControlPlaneConfig> = {}): ControlPlane {
   return new ControlPlane({ ...DEFAULT_CONTROL_PLANE, ...overrides });
 }
 
-/** Snapshot the plane into the shape the invariant checker consumes. */
-function stateOf(plane: ControlPlane, vtime: number): CheckableState {
-  const c = plane.counters;
-  return {
-    vtime,
-    inFlightByTenant: plane.inFlightByTenant(),
-    capByTenant: plane.capsMap(),
-    poolCapacity: DEFAULT_CONTROL_PLANE.poolCapacity,
-    totalClaimed: plane.totalClaimed,
-    claimsGranted: c.claimsGranted,
-    releasesDone: c.releasesDone,
-    creditsSpent: plane.creditsSpentMap(),
-    // The independent recomputation, NOT `creditsSpentMap()` a second time —
-    // aliasing the two made I4 compare a map to itself, so it could not fire.
-    creditsExpected: plane.creditsExpected(),
-    slotOwnerToken: new Map(),
-    acceptedReleases: c.acceptedReleases,
-    replayIds: plane.log.assignedIds(),
-    effectCounts: plane.effectCountsMap(),
-    quiesced: false,
-    ticksSinceQuiesce: 0,
-    livenessBoundN: 100,
-  };
+/** A plane plus the request history I4's expected side is rebuilt from. */
+function dp(overrides: Partial<ControlPlaneConfig> = {}): DrivenPlane {
+  return new DrivenPlane({ ...DEFAULT_CONTROL_PLANE, ...overrides });
 }
+
+/**
+ * THERE IS NO LOCAL `stateOf` HERE ANY MORE, DELIBERATELY.
+ *
+ * Five files each had their own copy. Two of them wired I4's two inputs to the
+ * same object (L11) and all five passed an empty `slotOwnerToken` (L24) — a
+ * duplicated oracle wiring is a duplicated place for an oracle to be unplugged,
+ * and nothing about a copy announces that it has stopped grading. The single
+ * builder is `DrivenPlane.state()`, and `test/precedence.test.ts` asserts that
+ * no other file constructs a `CheckableState` from a `ControlPlane`.
+ *
+ * Tests that only need behaviour keep using a bare plane; tests that check an
+ * invariant go through `DrivenPlane`, which is also what records the request
+ * history I4's expected side is rebuilt from.
+ */
 
 describe("admission — caps (SEMANTICS B1, B2, B3)", () => {
   it("B1: the cap counts CLAIMED slots, and holds", () => {
@@ -54,10 +50,10 @@ describe("admission — caps (SEMANTICS B1, B2, B3)", () => {
   });
 
   it("B2: the cap is never exceeded, even across many interleaved admits", () => {
-    const plane = cp();
-    for (let i = 0; i < 50; i++) plane.admit(0, "acme", `r${i}`);
-    expect(plane.inFlightByTenant().get("acme")).toBeLessThanOrEqual(3);
-    expect(checkAll(stateOf(plane, 0))).toEqual([]);
+    const d = dp();
+    for (let i = 0; i < 50; i++) d.admit(0, "acme", `r${i}`);
+    expect(d.plane.inFlightByTenant().get("acme")).toBeLessThanOrEqual(3);
+    expect(checkAll(d.state(0))).toEqual([]);
   });
 
   it("B3/B4: the two rejection reasons are distinguishable (B5)", () => {
@@ -85,14 +81,14 @@ describe("admission — caps (SEMANTICS B1, B2, B3)", () => {
   });
 
   it("never overcommits the pool across all tenants (I2)", () => {
-    const plane = cp();
+    const d = dp();
     for (let i = 0; i < 20; i++) {
-      plane.admit(0, "acme", `a${i}`);
-      plane.admit(0, "globex", `g${i}`);
-      plane.admit(0, "initech", `i${i}`);
+      d.admit(0, "acme", `a${i}`);
+      d.admit(0, "globex", `g${i}`);
+      d.admit(0, "initech", `i${i}`);
     }
-    expect(plane.totalClaimed).toBeLessThanOrEqual(DEFAULT_CONTROL_PLANE.poolCapacity);
-    expect(checkAll(stateOf(plane, 0))).toEqual([]);
+    expect(d.plane.totalClaimed).toBeLessThanOrEqual(DEFAULT_CONTROL_PLANE.poolCapacity);
+    expect(checkAll(d.state(0))).toEqual([]);
   });
 });
 
@@ -101,7 +97,7 @@ describe("credit (SEMANTICS A1, A2, A3)", () => {
     const plane = cp();
     // Rejected admits must not spend credit.
     for (let i = 0; i < 10; i++) plane.admit(0, "acme", `r${i}`);
-    const spent = plane.creditsSpentMap().get("acme") ?? 0;
+    const spent = plane.creditsSpentMap(0).get("acme") ?? 0;
     // Only 3 could be claimed (cap), so only 3 credits may have moved.
     expect(spent).toBe(3);
   });
@@ -124,27 +120,51 @@ describe("credit (SEMANTICS A1, A2, A3)", () => {
     );
   });
 
-  it("I4: the independent recomputation is window-scoped, like the counter it checks", () => {
+  it("I4: the history-derived ledger is window-scoped, like the counter it checks", () => {
     // `creditsSpent` resets on every roll, so a recomputation that counts runs
     // across ALL windows measures a different quantity and I4 fires the moment
     // a boundary is crossed. It agreed for one reason only: nothing ever
     // crossed one. Corpus histories topped out at tick 85 against a window of
     // 100, and the corpus passed `creditsSpentMap()` as both sides of I4.
-    const plane = cp();
-    plane.admit(0, "acme", "w0-a");
-    plane.admit(1, "acme", "w0-b");
-    plane.complete(2, "w0-a", "completed");
-    plane.complete(3, "w0-b", "completed");
+    const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
+    d.admit(0, "acme", "w0-a");
+    d.admit(1, "acme", "w0-b");
+    d.complete(2, "w0-a");
+    d.complete(3, "w0-b");
 
     const next = DEFAULT_CONTROL_PLANE.windowTicks + 20;
-    plane.admit(next, "acme", "w1-a");
+    d.admit(next, "acme", "w1-a");
 
-    expect(plane.creditsSpentMap().get("acme"), "one claim in this window").toBe(1);
+    expect(d.plane.creditsSpentMap(next).get("acme"), "one claim here").toBe(1);
     expect(
-      plane.creditsExpected().get("acme"),
+      d.state(next).creditsExpected.get("acme"),
       "the recomputation must count this window too, not every window ever",
     ).toBe(1);
-    expect(checkAll(stateOf(plane, next))).toEqual([]);
+    expect(checkAll(d.state(next))).toEqual([]);
+  });
+
+  /**
+   * A11 — THE LEDGER IS A FUNCTION OF TIME, NOT OF TRAFFIC.
+   *
+   * The counter used to be rolled lazily from inside `admit`, so between a
+   * window boundary and the next admission it still reported the PREVIOUS
+   * epoch's spend. No admission decision could see it (admit rolls before it
+   * reads), so it survived every test until an oracle derived the window from
+   * the event's own vtime and the two disagreed (LEDGER L25).
+   */
+  it("A11: the ledger reads zero in a new window even if nothing has arrived", () => {
+    const plane = cp();
+    plane.admit(0, "acme", "a");
+    plane.admit(1, "acme", "b");
+    expect(plane.creditsSpentMap(1).get("acme")).toBe(2);
+
+    const nextWindow = DEFAULT_CONTROL_PLANE.windowTicks;
+    expect(
+      plane.creditsSpentMap(nextWindow).get("acme"),
+      "a new epoch starts at zero whether or not traffic has rolled it",
+    ).toBe(0);
+    // And the old epoch is not retroactively rewritten.
+    expect(plane.creditsSpentMap(1).get("acme")).toBe(2);
   });
 });
 
@@ -261,33 +281,33 @@ describe("leases and fencing (SEMANTICS C1, C2, C4)", () => {
     // Non-vacuity for the fix above: if complete()/cancel() stopped reporting
     // their releases as facts, I5 would go back to being blind to two thirds
     // of the surface and this assertion would fail.
-    const plane = cp();
-    const a = plane.admit(0, "acme", "r1");
+    const d = dp();
+    const a = d.admit(0, "acme", "r1");
     expect(a.ok).toBe(true);
-    expect(plane.counters.acceptedReleases).toHaveLength(0);
+    expect(d.plane.counters.acceptedReleases).toHaveLength(0);
 
-    plane.complete(1, "r1", "completed");
+    d.complete(1, "r1");
     expect(
-      plane.counters.acceptedReleases,
+      d.plane.counters.acceptedReleases,
       "a completion that frees a slot is a release the checker must see",
     ).toHaveLength(1);
 
-    const b = plane.admit(2, "globex", "r2");
+    const b = d.admit(2, "globex", "r2");
     expect(b.ok).toBe(true);
-    plane.cancel(3, "r2");
-    expect(plane.counters.acceptedReleases).toHaveLength(2);
-    expect(checkAll(stateOf(plane, 3)), "all of them are legitimate").toEqual([]);
+    d.cancel(3, "r2");
+    expect(d.plane.counters.acceptedReleases).toHaveLength(2);
+    expect(checkAll(d.state(3)), "all of them are legitimate").toEqual([]);
   });
 
   it("a valid release succeeds and returns the slot to the pool", () => {
-    const plane = cp();
-    const a = plane.admit(0, "acme", "a");
+    const d = dp();
+    const a = d.admit(0, "acme", "a");
     expect(a.ok).toBe(true);
     if (!a.ok) return;
-    expect(plane.totalClaimed).toBe(1);
-    expect(plane.release(1, a.slotId, a.token).ok).toBe(true);
-    expect(plane.totalClaimed).toBe(0);
-    expect(checkAll(stateOf(plane, 1))).toEqual([]);
+    expect(d.plane.totalClaimed).toBe(1);
+    expect(d.release(1, "a")?.ok).toBe(true);
+    expect(d.plane.totalClaimed).toBe(0);
+    expect(checkAll(d.state(1))).toEqual([]);
   });
 
   it("C2: an expired lease is reclaimed, freeing capacity", () => {
@@ -303,23 +323,23 @@ describe("leases and fencing (SEMANTICS C1, C2, C4)", () => {
 
 describe("completion and idempotence (SEMANTICS E7, and I8)", () => {
   it("I8: the effect is applied exactly once however many deliveries arrive", () => {
-    const plane = cp();
-    const a = plane.admit(0, "acme", "run-1");
+    const d = dp();
+    const a = d.admit(0, "acme", "run-1");
     expect(a.ok).toBe(true);
 
-    const first = plane.complete(5, "run-1", "completed");
+    const first = d.complete(5, "run-1");
     expect(first.ok).toBe(true);
     if (first.ok) expect(first.duplicate).toBe(false);
 
     // Eight more deliveries of the same completion.
     for (let i = 0; i < 8; i++) {
-      const dup = plane.complete(5 + i, "run-1", "completed");
+      const dup = d.complete(5 + i, "run-1");
       expect(dup.ok, "a duplicate must be ACKED, not errored (E7)").toBe(true);
       if (dup.ok) expect(dup.duplicate).toBe(true);
     }
 
-    expect(plane.effectCountsMap().get("run-1")).toBe(1);
-    expect(checkAll(stateOf(plane, 20))).toEqual([]);
+    expect(d.plane.effectCountsMap().get("run-1")).toBe(1);
+    expect(checkAll(d.state(20))).toEqual([]);
   });
 
   it("rejects a completion for a run it has never heard of", () => {
@@ -346,11 +366,11 @@ describe("cancellation (SEMANTICS D1, D2, D4)", () => {
   });
 
   it("D4: cancel is idempotent", () => {
-    const plane = cp();
-    plane.admit(0, "acme", "run-z");
-    expect(plane.cancel(1, "run-z")).toBe("cancelled");
-    expect(plane.cancel(2, "run-z")).toBe("noop");
-    expect(checkAll(stateOf(plane, 2))).toEqual([]);
+    const d = dp();
+    d.admit(0, "acme", "run-z");
+    expect(d.cancel(1, "run-z")).toBe("cancelled");
+    expect(d.cancel(2, "run-z")).toBe("noop");
+    expect(checkAll(d.state(2))).toEqual([]);
   });
 
   it("E8: a completion after a cancel is recorded but the effect is NOT applied", () => {
@@ -470,5 +490,89 @@ describe("replay log (SEMANTICS E1, E2, E3, E5, E6)", () => {
 
     log.acknowledge(sub, 2, 2);
     expect(log.deliver(sub).length, "acking reopens the window").toBe(2);
+  });
+});
+
+describe("subscriber credit is the PUBLISHER's decision (SEMANTICS E9, E10)", () => {
+  function loaded(entries: number, maxCredits?: number): ReplayLog {
+    const log = new ReplayLog(10_000, 10_000, maxCredits);
+    for (let i = 0; i < entries; i++) {
+      log.append({ vtime: i, tenant: "t", runId: `r${i}`, outcome: "completed" });
+    }
+    return log;
+  }
+
+  it("E9: a subscriber cannot grant itself more credit than the publisher allows", () => {
+    // `acknowledge` used to do `sub.credits = grantedCredits`, straight from
+    // the subscriber and unbounded. Credit-based flow control that constrains
+    // only the subscribers who choose to be constrained is not flow control.
+    const log = loaded(200, 8);
+    const sub: SubscriberState = { name: "greedy", cursor: 1, credits: 1, inFlight: 0 };
+
+    log.acknowledge(sub, 0, 1_000_000);
+    expect(sub.credits, "the grant is clamped to the publisher's ceiling").toBe(8);
+    expect(
+      log.deliver(sub).length,
+      "and the clamp must actually bound the delivery, not just the field",
+    ).toBe(8);
+  });
+
+  it("E9: the clamp is COUNTED, because a clamped subscriber looks like a stalled one", () => {
+    const log = loaded(50, 4);
+    const sub: SubscriberState = { name: "s", cursor: 1, credits: 1, inFlight: 0 };
+    expect(log.clampedGrants).toBe(0);
+
+    log.acknowledge(sub, 0, 4); // exactly at the ceiling — not a clamp
+    expect(log.clampedGrants, "a grant at the ceiling is not clamped").toBe(0);
+
+    log.acknowledge(sub, 0, 5);
+    expect(log.clampedGrants, "a grant above the ceiling is recorded").toBe(1);
+  });
+
+  it("E9: a negative grant becomes zero rather than a negative window", () => {
+    const log = loaded(10);
+    const sub: SubscriberState = { name: "s", cursor: 1, credits: 5, inFlight: 0 };
+    log.acknowledge(sub, 0, -3);
+    expect(sub.credits).toBe(0);
+    expect(log.deliver(sub), "zero credit pauses, it does not drop (E5)").toEqual([]);
+  });
+
+  it("E10: an ack granting FEWER credits than are in flight pauses, and recovers", () => {
+    // The hazard is not the pause — E5 says a pause is correct. It is a pause
+    // the subscriber cannot get out of. It can: every in-flight entry has
+    // already been delivered, so it can always be acknowledged.
+    const log = loaded(20);
+    const sub: SubscriberState = { name: "s", cursor: 1, credits: 6, inFlight: 0 };
+    expect(log.deliver(sub)).toHaveLength(6);
+    expect(sub.inFlight).toBe(6);
+
+    // Ack nothing, and ask for a window smaller than what is outstanding.
+    log.acknowledge(sub, 0, 2);
+    expect(sub.credits).toBe(2);
+    expect(sub.inFlight).toBe(6);
+    expect(log.deliver(sub), "credits below in-flight means paused").toEqual([]);
+
+    // The way out is the entries it already holds.
+    log.acknowledge(sub, 6, 2);
+    expect(sub.inFlight, "acking what it holds releases the window").toBe(0);
+    expect(log.deliver(sub), "and delivery resumes at the granted width").toHaveLength(2);
+  });
+
+  it("E10: nothing is dropped while paused — the cursor never skips", () => {
+    // The pause must not advance the stream. A fold with a hole in it is
+    // corrupt, not degraded (E5), and that is the whole argument for pausing.
+    const log = loaded(12);
+    const sub: SubscriberState = { name: "s", cursor: 1, credits: 3, inFlight: 0 };
+    const first = log.deliver(sub);
+    expect(first.map((e) => e.replayId)).toEqual([1, 2, 3]);
+
+    log.acknowledge(sub, 0, 0); // paused, nothing acked
+    expect(log.deliver(sub)).toEqual([]);
+
+    log.acknowledge(sub, 3, 3);
+    expect(
+      log.deliver(sub).map((e) => e.replayId),
+      "resumes at 4, skipping nothing",
+    ).toEqual([4, 5, 6]);
   });
 });

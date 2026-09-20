@@ -53,3 +53,12 @@ A survivor is not automatically a bug. Triage each into:
 | `src/policy/replayLog.ts:133` | `cmp:<=-><` | `if (available <= 0) return []; // paused, not dropping` | EQUIVALENT — when `available` is exactly 0, the guarded path calls readFrom(cursor, 0), which returns an empty list anyway. Behaviour is identical either way; the guard is an early return, not a correctness check. |
 
 *Generated over 5 source files in `src/policy`.*
+
+`src/sim`, `src/cli` and `src/tierb` are NOT mutated, and the reason is stated
+rather than left as a footnote: `src/sim` is driven by
+`test/faultInjection.test.ts` through a seeded fault schedule, so a mutant there
+changes which faults are injected rather than whether the system survives them —
+it would be scored against a different workload, which measures nothing.
+`src/cli` and `src/tierb` are I/O shells whose behaviour is asserted by
+process-level tests that this harness cannot attribute. Both are gaps; naming
+them is the point.

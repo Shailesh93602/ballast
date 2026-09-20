@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Mechanical mutation testing over `src/policy/**`.
+ * Mechanical mutation testing over `src/policy`, `src/oracle` and `src/core`.
  *
  * WHY THIS EXISTS, when there are already 16 hand-written semantic mutants:
  * those are bugs I thought of. Catching all of them proves the suite handles my
@@ -28,15 +28,26 @@
  * Run: node scripts/mutate.mjs [--quick]
  */
 
-import { readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join, relative } from "node:path";
 import * as esbuild from "esbuild";
+import {
+  TARGET_DIRS,
+  UNMUTATED_SCOPES,
+  gradedSuite,
+  reachesFile,
+} from "./mutationScope.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
-const TARGET_DIR = join(root, "src", "policy");
+
+/**
+ * Scope and the graded suite are computed in `mutationScope.mjs` — extracted so
+ * `test/mutation.test.ts` can assert them without running the campaign.
+ */
+const { graded: SUITE_FILES, skipped: SKIPPED_FILES } = gradedSuite();
 const QUICK = process.argv.includes("--quick");
 
 /** Every mutation operator, as a line-level rewrite with a name. */
@@ -51,9 +62,16 @@ const OPERATORS = [
 ];
 
 function sourceFiles() {
-  return readdirSync(TARGET_DIR)
-    .filter((f) => f.endsWith(".ts"))
-    .map((f) => join(TARGET_DIR, f));
+  return TARGET_DIRS.flatMap((dir) =>
+    readdirSync(dir)
+      .filter((f) => f.endsWith(".ts"))
+      .map((f) => join(dir, f)),
+  );
+}
+
+/** "policy" | "oracle" | "core", from a file path. */
+function scopeOf(file) {
+  return relative(join(root, "src"), file).split("/")[0];
 }
 
 /**
@@ -153,18 +171,75 @@ function buildMutants() {
   return mutants;
 }
 
-function runSuite() {
+/**
+ * Run some test files. Returns "pass", "fail" or "timeout".
+ *
+ * "timeout" IS NOT A KILL. A mutant is judged killed when the suite fails an
+ * assertion; a suite that failed because a process-spawning test ran out of
+ * wall clock under load has said nothing about the mutant at all. Counting it
+ * would be the same error as L19 (a mutant killed by a syntax error) and L7 (a
+ * mutant killed by an already-red suite): a kill that measures nothing, in the
+ * direction that flatters the score (LEDGER L27).
+ */
+function runFiles(files) {
   try {
-    execFileSync("npx", ["vitest", "run", "--reporter=dot"], {
+    execFileSync("npx", ["vitest", "run", "--reporter=dot", ...files], {
       cwd: root,
       stdio: "pipe",
       encoding: "utf8",
-      timeout: 120_000,
+      timeout: 300_000,
     });
-    return true; // suite passed -> mutant SURVIVED
-  } catch {
-    return false; // suite failed -> mutant KILLED
+    return "pass";
+  } catch (err) {
+    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    if (/Test timed out in \d+ms/.test(out) || err.killed === true) return "timeout";
+    return "fail";
   }
+}
+
+const runSuite = () => runFiles(SUITE_FILES);
+
+/**
+ * WHAT EACH TEST FILE COSTS, MEASURED ONCE — not guessed, and not a hand list.
+ *
+ * A mutant is killed the moment ANY graded file fails, so the campaign only has
+ * to keep running files while they keep passing. Ordering them cheapest-first
+ * and stopping at the first failure turns the common case — a mutant killed by
+ * a fast unit test — from "run everything that can see it" into "run one file".
+ *
+ * The ordering is calibrated at startup rather than written down, for the same
+ * reason the exclusion set is computed rather than listed: a hand-maintained
+ * order goes stale the moment a file gets slower, and nothing would say so.
+ * It costs one run per file, once.
+ *
+ * This changes what is RUN, never what is CONCLUDED: the files skipped after a
+ * failure could only have agreed with it, since one failure is already a kill.
+ */
+function calibrate() {
+  const cost = new Map();
+  for (const f of SUITE_FILES) {
+    const t0 = Date.now();
+    runFiles([f]);
+    cost.set(f, Date.now() - t0);
+  }
+  return cost;
+}
+
+/**
+ * Grade one mutant: cheapest-first, short-circuiting on the first failure, and
+ * only against files that can REACH the mutated module at all.
+ */
+function judge(mutatedFile, cost) {
+  const files = SUITE_FILES.filter((f) => reachesFile(f, mutatedFile)).sort(
+    (a, b) => (cost.get(a) ?? 0) - (cost.get(b) ?? 0),
+  );
+  let sawTimeout = false;
+  for (const f of files) {
+    const verdict = runFiles([f]);
+    if (verdict === "fail") return "fail";
+    if (verdict === "timeout") sawTimeout = true;
+  }
+  return sawTimeout ? "timeout" : "pass";
 }
 
 /**
@@ -178,7 +253,7 @@ function runSuite() {
  * and the run reported 100% while genuinely surviving mutants went unnoticed.
  * The number that should have raised an alarm was the reassuring one.
  */
-if (!runSuite()) {
+if (runSuite() !== "pass") {
   console.error(
     [
       "REFUSING TO RUN: the test suite fails before any mutation is applied.",
@@ -221,7 +296,8 @@ const mutants = generated.filter((m) => parses(m.content));
 const selected = QUICK ? mutants.filter((_, i) => i % 4 === 0) : mutants;
 
 console.log(
-  `Mutation testing over src/policy — ${selected.length} mutants` +
+  `Mutation testing over ${TARGET_DIRS.map((d) => relative(root, d)).join(", ")} — ` +
+    `${selected.length} mutants` +
     (QUICK ? ` (quick: 1 in 4 of ${mutants.length})` : ""),
 );
 if (invalid.length > 0) {
@@ -233,41 +309,111 @@ if (invalid.length > 0) {
     console.log(`  ${relative(root, m.file)}:${m.line}  ${m.operator}  ${m.original}`);
   }
 }
+console.log("calibrating per-file cost (one run each, once) …");
+const FILE_COST = calibrate();
+for (const [f, ms] of [...FILE_COST].sort((a, b) => a[1] - b[1])) {
+  console.log(`  ${String(ms).padStart(6)}ms  ${relative(root, f)}`);
+}
 console.log("─".repeat(72));
 
 const survivors = [];
+const perScope = new Map();
+for (const m of selected) {
+  const sc = scopeOf(m.file);
+  if (!perScope.has(sc)) perScope.set(sc, { total: 0, killed: 0 });
+  perScope.get(sc).total++;
+}
 let killed = 0;
 const originals = new Map();
 for (const f of sourceFiles()) originals.set(f, readFileSync(f, "utf8"));
 
+/**
+ * A MARKER THAT SAYS "THERE MAY BE A MUTANT IN YOUR SOURCE RIGHT NOW".
+ *
+ * This harness edits `src/` in place and restores it after each mutant. Kill it
+ * between those two writes — ^C, a crash, a closed laptop — and a one-line
+ * mutation is left sitting in the working tree, indistinguishable from code
+ * somebody meant to write. That happened during this round: an interrupted run
+ * left `if (!(window !== this.creditsWindow))` in `debit()`, and it was found by
+ * grepping the diff for operator artefacts rather than by anything automatic.
+ *
+ * The marker is written before the first mutation and removed after the last,
+ * and `test/mutation.test.ts` fails while it exists. A corrupted working tree
+ * is now loud instead of silent.
+ */
+const MARKER = join(root, ".mutation-in-progress");
+writeFileSync(
+  MARKER,
+  "A mutation campaign was interrupted. src/ may contain a planted mutant.\n" +
+    "Restore with: git diff src/ | grep -nE '\\+ 0|- 0|if \\(!\\('\n" +
+    "then delete this file.\n",
+  "utf8",
+);
+const clearMarker = () => {
+  for (const [f, src] of originals) writeFileSync(f, src, "utf8");
+  rmSync(MARKER, { force: true });
+};
+process.on("SIGINT", () => {
+  clearMarker();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  clearMarker();
+  process.exit(143);
+});
+
+const inconclusive = [];
 let idx = 0;
 for (const m of selected) {
   idx++;
   writeFileSync(m.file, m.content, "utf8");
-  const survived = runSuite();
+  let verdict = judge(m.file, FILE_COST);
+  // One retry: a timeout under load is noise, and noise must not be scored.
+  if (verdict === "timeout") verdict = judge(m.file, FILE_COST);
   writeFileSync(m.file, originals.get(m.file), "utf8");
 
-  if (survived) {
+  if (verdict === "timeout") {
+    inconclusive.push(m);
+    perScope.get(scopeOf(m.file)).total--;
+    console.log(
+      `INCONCLUSIVE (timed out twice)  ${relative(root, m.file)}:${m.line}  ${m.operator}`,
+    );
+  } else if (verdict === "pass") {
     survivors.push(m);
     console.log(
       `SURVIVED  ${relative(root, m.file)}:${m.line}  ${m.operator}\n            ${m.original}`,
     );
   } else {
     killed++;
+    perScope.get(scopeOf(m.file)).killed++;
   }
   if (idx % 10 === 0) {
     console.log(
-      `… ${idx}/${selected.length}  killed=${killed} survived=${survivors.length}`,
+      `… ${idx}/${selected.length}  killed=${killed} survived=${survivors.length}` +
+        (inconclusive.length > 0 ? ` inconclusive=${inconclusive.length}` : ""),
     );
   }
 }
 
-// Restore everything, defensively.
-for (const [f, src] of originals) writeFileSync(f, src, "utf8");
+// Restore everything, defensively, and clear the interrupted-run marker.
+clearMarker();
 
-const score = selected.length === 0 ? 0 : (killed / selected.length) * 100;
+const scored = selected.length - inconclusive.length;
+const score = scored === 0 ? 0 : (killed / scored) * 100;
+const scopeRows = [...perScope.entries()]
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([scope, s]) => ({
+    scope,
+    ...s,
+    score: s.total === 0 ? 0 : (s.killed / s.total) * 100,
+  }));
 console.log("─".repeat(72));
-console.log(`killed ${killed}/${selected.length}   mutation score ${score.toFixed(1)}%`);
+for (const r of scopeRows) {
+  console.log(
+    `  src/${r.scope.padEnd(7)} killed ${r.killed}/${r.total}   ${r.score.toFixed(1)}%`,
+  );
+}
+console.log(`killed ${killed}/${scored}   mutation score ${score.toFixed(1)}%`);
 
 /**
  * Hand triage for survivors that are genuinely EQUIVALENT.
@@ -338,10 +484,23 @@ const report = [
   "",
   "## Result",
   "",
-  `- Mutants generated: **${selected.length}**${QUICK ? ` (quick sample of ${mutants.length})` : ""}`,
+  `- Mutants generated: **${scored}**${QUICK ? ` (quick sample of ${mutants.length})` : ""}`,
   `- Killed: **${killed}**`,
   `- Survived: **${survivors.length}**`,
   `- **Mutation score: ${score.toFixed(1)}%**`,
+  "",
+  "### By scope",
+  "",
+  "Reported separately because they mean different things. A survivor in",
+  "`src/policy` is a gap in the tests. A survivor in `src/oracle` is an oracle",
+  "that can be wrong without any test noticing — which is this project's",
+  "recurring failure, not a lesser version of it.",
+  "",
+  "| Scope | Killed | Total | Score |",
+  "| --- | --- | --- | --- |",
+  ...scopeRows.map(
+    (r) => `| \`src/${r.scope}\` | ${r.killed} | ${r.total} | ${r.score.toFixed(1)}% |`,
+  ),
   "",
   invalid.length === 0
     ? "Every generated mutant parsed, so every one of them could have survived."
@@ -350,6 +509,31 @@ const report = [
       "rather than counted. A mutant killed by a syntax error measures nothing " +
       "about the suite — the same class of error as L7.",
   "",
+  inconclusive.length === 0
+    ? "Every mutant reached a verdict: the graded suite either failed an " +
+      "assertion (killed) or passed (survived)."
+    : `${inconclusive.length} mutant(s) are INCONCLUSIVE — the graded suite ` +
+      "timed out twice rather than failing an assertion, so they are excluded " +
+      "from the denominator rather than counted as kills. A mutant killed by " +
+      "a stopwatch measures nothing about the suite, the same error as L19.",
+  "",
+  "## What the mutants are graded against",
+  "",
+  `${SUITE_FILES.length} of ${SUITE_FILES.length + SKIPPED_FILES.length} test files.` +
+    " The rest import nothing from the mutated directories, directly or" +
+    " transitively, so they cannot observe a mutation — they exercise a shell" +
+    " script, the eslint perimeter and the Tier B Postgres arm. The set is" +
+    " computed by walking each test file's imports, not listed by hand, and" +
+    " `test/mutation.test.ts` asserts the walk is sound.",
+  "",
+  ...(SKIPPED_FILES.length === 0
+    ? []
+    : [
+        "Not graded against: " +
+          SKIPPED_FILES.map((f) => "`" + relative(root, f) + "`").join(", ") +
+          ".",
+        "",
+      ]),
   "## Operators",
   "",
   "| Operator | Meaning |",
@@ -380,7 +564,18 @@ const report = [
         }),
       ].join("\n"),
   "",
-  `*Generated over ${sourceFiles().length} source files in \`src/policy\`.*`,
+  `*Generated over ${sourceFiles().length} source files in ` +
+    `${TARGET_DIRS.map((d) => "`" + relative(root, d) + "`").join(", ")}.*`,
+  "",
+  `${UNMUTATED_SCOPES.map((x) => "`src/" + x + "`").join(", ")} are NOT mutated, ` +
+    "and the reason is",
+  "stated rather than left as a footnote: `src/sim` is driven by",
+  "`test/faultInjection.test.ts` through a seeded fault schedule, so a mutant",
+  "there changes which faults are injected rather than whether the system",
+  "survives them — it would be scored against a different workload, which",
+  "measures nothing. `src/cli` and `src/tierb` are I/O shells whose behaviour",
+  "is asserted by process-level tests that this harness cannot attribute.",
+  "Both are gaps; naming them is the point.",
 ].join("\n");
 
 writeFileSync(join(root, "docs", "MUTATION.md"), report + "\n", "utf8");

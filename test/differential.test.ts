@@ -3,7 +3,8 @@ import { ControlPlane } from "../src/policy/controlPlane.js";
 import { DEFAULT_CONTROL_PLANE } from "../src/policy/types.js";
 import { referenceDecision, type RefEvent } from "../src/oracle/reference.js";
 import { Rng } from "../src/core/rng.js";
-import { checkAll, type CheckableState } from "../src/oracle/invariants.js";
+import { checkAll } from "../src/oracle/invariants.js";
+import { DrivenPlane } from "./support/planeHarness.js";
 
 /**
  * The model-based differential.
@@ -119,32 +120,6 @@ function runImplementation(history: readonly RefEvent[]): string[] {
  */
 const HISTORY_LENGTH = 120;
 
-function stateOf(plane: ControlPlane, vtime: number): CheckableState {
-  const c = plane.counters;
-  return {
-    vtime,
-    inFlightByTenant: plane.inFlightByTenant(),
-    capByTenant: plane.capsMap(),
-    poolCapacity: DEFAULT_CONTROL_PLANE.poolCapacity,
-    totalClaimed: plane.totalClaimed,
-    claimsGranted: c.claimsGranted,
-    releasesDone: c.releasesDone,
-    creditsSpent: plane.creditsSpentMap(),
-    // NOT `creditsSpentMap()` again. It used to be, on both sides — so I4
-    // compared a map to ITSELF for every event of every seed and was
-    // structurally incapable of firing. `creditsExpected()` is the independent
-    // recomputation the CheckableState field has always advertised.
-    creditsExpected: plane.creditsExpected(),
-    slotOwnerToken: new Map(),
-    acceptedReleases: c.acceptedReleases,
-    replayIds: plane.log.assignedIds(),
-    effectCounts: plane.effectCountsMap(),
-    quiesced: false,
-    ticksSinceQuiesce: 0,
-    livenessBoundN: 100,
-  };
-}
-
 /**
  * A corpus is worth what it REACHES, not what it runs.
  *
@@ -204,25 +179,17 @@ describe("invariants hold across a randomized corpus", () => {
     const failures: Array<{ seed: number; detail: string }> = [];
     for (let seed = 1; seed <= 2000; seed++) {
       const history = makeHistory(seed, HISTORY_LENGTH);
-      const plane = new ControlPlane(DEFAULT_CONTROL_PLANE);
-      const slotOf = new Map<string, { slotId: string; token: number }>();
+      const d = new DrivenPlane(DEFAULT_CONTROL_PLANE);
 
       for (const ev of history) {
-        if (ev.kind === "admit") {
-          const r = plane.admit(ev.vtime, ev.tenant, ev.runId);
-          if (r.ok) slotOf.set(ev.runId, { slotId: r.slotId, token: r.token });
-        } else if (ev.kind === "release") {
-          const held = slotOf.get(ev.runId);
-          if (held !== undefined) plane.release(ev.vtime, held.slotId, held.token);
-        } else if (ev.kind === "complete") {
-          plane.complete(ev.vtime, ev.runId, "completed");
-        } else {
-          plane.cancel(ev.vtime, ev.runId);
-        }
+        if (ev.kind === "admit") d.admit(ev.vtime, ev.tenant, ev.runId);
+        else if (ev.kind === "release") d.release(ev.vtime, ev.runId);
+        else if (ev.kind === "complete") d.complete(ev.vtime, ev.runId);
+        else d.cancel(ev.vtime, ev.runId);
 
         // AFTER EVERY EVENT — SEMANTICS F1. An end-of-run check would miss
         // transient violations, which is exactly what faults produce.
-        const violations = checkAll(stateOf(plane, ev.vtime));
+        const violations = checkAll(d.state(ev.vtime));
         if (violations.length > 0) {
           failures.push({ seed, detail: violations[0]!.detail });
           break;

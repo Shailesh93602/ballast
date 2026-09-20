@@ -161,7 +161,7 @@ describe("determinism guard — the CONTROL PLANE", () => {
       // guard fail for a config reordering rather than for nondeterminism.
       h.update(
         `${plane.totalClaimed}|${sortedPairs(plane.inFlightByTenant())}|` +
-          `${sortedPairs(plane.creditsSpentMap())}|${JSON.stringify(plane.log.assignedIds())}`,
+          `${sortedPairs(plane.creditsSpentMap(vtime))}|${JSON.stringify(plane.log.assignedIds())}`,
       );
     }
     return h.digest("hex");

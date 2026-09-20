@@ -41,18 +41,27 @@ and are deliberately kept out of this list.
 | **L19** | Parse-checking the corpus         | **3 of 165 mutants do not parse** and were scored as kills. A mutant killed by a syntax error measures nothing about the suite.                                                                                                                                       |
 | **L20** | `grep -rn Substrate`              | **The fault injector was connected to nothing.** 173 lines modelling duplicates, reordering, stale readiness and pod death — used by its own unit test and, for one fault kind, by KhataGO. The control plane was never handed a single fault.                        |
 | **L21** | The fault-injected corpus, seed 1 | **A retried admit was a second run.** At-least-once delivery makes a duplicate admit routine; it took a second slot and spent a second credit for one logical run. A7 settled this for completions and nobody asked it of admissions.                                 |
+| **L22** | Reading A9 against the code       | **The fourth door.** C6 fenced every path that FREES a slot. The path that GRANTS one checked only that the slot EXISTS — always true, since slots are never removed — so a retry was answered with a slot the caller did not hold, and after a reclaim, with another tenant's. |
+| **L23** | Writing the precedence row        | **Both engines derived an unwritten order, and already disagreed.** An unknown tenant naming a cancelled runId got `unknown-tenant` from one and `cancelled-before-start` from the other. Every corpus draws tenants from the config, so nothing could ask.                     |
+| **L24** | Grepping the checker's own inputs | **A declared oracle input that nothing wrote and no invariant read.** `slotOwnerToken` was passed as `new Map()` by every corpus — L5's dead state, one layer up, in the apparatus.                                                                                             |
+| **L25** | Building the independent ledger   | **The credit ledger described the epoch of the last ADMISSION**, not the one containing `now`, because the window rolled only inside `admit`. Invisible to every admission decision, which is why it survived.                                                                  |
+| **L26** | Asking what could kill an RNG mutant | **The determinism guard cannot tell a correct generator from a changed one.** Same-seed-twice, across-process and distinctness all hold for a wrong PRNG. The README's three hashes were checked by nothing.                                                                 |
+| **L27** | The harness refusing to start     | **A mutant "killed" by a TIMEOUT was scored as a kill.** A timeout exits non-zero, and non-zero is how a kill is judged — so a busy machine inflated the score, invisibly. L7 and L19 twice removed.                                                                            |
 
 Full write-ups: [`LEDGER.md`](docs/LEDGER.md).
 
-Twelve of the twenty-one were in the **checker, the reference oracle or the harness**, not the
-system under test — L1 and L11 (the checker), L3 and L12 (the reference oracle), L7, L9, L15, L16,
-L17, L18, L19 and L20 (the guards, the fault injector and the mutation harness). That ratio is the most useful thing this project
+Sixteen of the twenty-seven were in the **checker, the reference oracle or the harness**, not the
+system under test — L1, L11 and L24 (the checker), L3, L12 and L23 (the reference oracle), L7, L9,
+L15, L16, L17, L18, L19, L20, L26 and L27 (the guards, the fault injector and the mutation
+harness). That ratio is the most useful thing this project
 taught: every layer that grades another needs someone grading it, and eventually that someone is you
 asking what the output would look like if the tool were wrong. Both numbers are counted from the
 table in `LEDGER.md` by a test, so this sentence cannot drift from it again.
 
-**L1–L9 were found by the harness; L10–L21 were found by auditing the harness** — reading what each
-oracle was actually handed, rather than what its field names said it was handed. L11 is the one to
+**L1–L9 were found by the harness; L10–L21 were found by auditing the harness; L22–L27 came from a
+second audit asking a narrower question** — which decisions do the two engines share WITHOUT having
+written them down? The first audit read what each oracle was actually handed, rather than what its
+field names said it was handed. L11 is the one to
 read: the documented risk was "the reference and the implementation share an author", and the actual
 failure was that the two halves of an invariant shared an _object reference_. L13 is its twin — the
 corpus could not have caught L12 even un-aliased, because no generated history ever reached tick 100.
@@ -72,6 +81,29 @@ would have silently occupied pool slots until their leases aged out.
 
 That is the entire argument for [`SEMANTICS.md`](docs/SEMANTICS.md) existing —
 and being committed — before a line of policy code.
+
+**L23 is L2's shadow, and the reason the second audit happened.** L2 was lucky:
+the two engines disagreed, so the differential caught it. L23 is the same class
+of gap where they agreed — an order neither document nor test fixed, which both
+halves resolved the same way for no better reason than one author and one
+afternoon. **The differential compares the rejection reason, which made the
+question look answered.** The useful question turned out not to be "what does
+the oracle check" but **"which decisions do the two engines share that nobody
+ever wrote down"** — and its answer cannot come from running anything, because
+every test passes.
+
+So the order lives in one place (SEMANTICS B7), a test **parses it out of the
+document**, the reference resolves through it instead of short-circuiting, and
+the implementation keeps its own source order. Three sources that must agree,
+none of which can be moved quietly.
+
+**L22 is what came of asking that question about the fencing token.** C6 says
+every path that FREES a slot compares tokens; it enumerated three doors. The
+path that GRANTS one was never asked, checked only that the slot existed —
+always true — and handed a retrying tenant a slot another tenant owned. Three
+corpora, eight invariants and a reference oracle were green against it, each for
+a different structural reason, and all of them are listed in `LEDGER.md` because
+the reasons are more useful than the bug.
 
 ---
 
@@ -130,6 +162,16 @@ implementation-against-intent; it cannot validate intent-against-reality. If a
 spec row is wrong, both halves are wrong together and the test passes. That is
 why the invariants exist independently of it.
 
+**A method on a class is not an oracle for that class.** I4's expected side used
+to be `ControlPlane.creditsExpected()` — a recomputation that walked `this.runs`,
+the same map `admit` writes. Two views of one piece of state can disagree about
+their own consistency and about nothing else, so the entire class of bug where
+the plane and its bookkeeping are wrong TOGETHER was outside I4's reach by
+construction. That is not hypothetical: it is exactly what L22 did — a claim the
+plane granted and never billed, missing from both sides at once. The expected
+side is now rebuilt from the **event history** by the reference model, which
+shares no state with the plane; L25 fell out of the change within minutes.
+
 **And an oracle is only as independent as its INPUTS.** The blind spot above is
 the one that gets written down; the one that actually happened was cruder. I4
 was handed `creditsSpentMap()` as both the value and the expectation, so the
@@ -155,17 +197,36 @@ the mechanism is sound. It does not show that KhataGO's Prisma calls implement
 the mechanism faithfully — that needs the real handler driven against a real
 database, which is Tier B and has not run yet.
 
+**A differential comparing REASONS still cannot see a shared order.** The
+differential was strengthened to compare the rejection reason and not just the
+admit/reject bit — which is strictly better, and which made rejection precedence
+look covered while both engines derived it from the same unwritten decision
+(L23). The lesson generalises past this repo: **strengthening an oracle can
+disguise a blind spot as coverage.** The questions that find these are not
+"what does the oracle check" but "what do both halves assume that nobody wrote
+down", and no amount of running anything will answer that one.
+
 **The claim protocol has no reaper.** A claimant that dies leaves its row stuck in
 `PROCESSING` forever. Asserted as a test so it cannot quietly stop being true.
 
-**I6 has never fired on a real run.** SEMANTICS F3 requires its liveness bound
-to be _calibrated_ from the corpus and asserted from both sides, precisely
-because "a hand-picked generous N makes I6 vacuous". No calibration exists:
-`livenessBoundN` is hardcoded by every caller and the corpus passes
-`quiesced: false` on every event, so `checkI6` returns on its first line. The
-checker can fire — `invariants.test.ts` proves it against synthetic states —
-but nothing drives it. This is open work, written down rather than left to be
-found; it needs a quiescence phase in the corpus.
+**I6 now fires on real runs, and the interesting part was not the loop.**
+It used to be the honest gap here: `livenessBoundN` was hardcoded by every
+caller and the corpus passed `quiesced: false` on every event, so `checkI6`
+returned on its first line for all 2,000 histories. Adding a drain turned out to
+expose something sharper — **under C5 reclamation is lazy, so if the workload
+simply stops, nothing reclaims anything and in-flight never reaches zero.**
+Admit one run, advance ten thousand ticks, call nothing: still held. "Drains
+within N ticks" was not uncalibrated in that world, it was false, and no choice
+of N would have fixed it.
+
+Quiescence therefore means what it means operationally — **new work stops, the
+system keeps being asked** — and the drain is driven by requests that `admit`
+refuses, because it reclaims expired leases before it even looks the tenant up.
+Measured over 200 fault-injected seeds: 198 reach quiescence still holding
+capacity, the longest drain is **40 ticks (exactly one lease)**, and N is
+computed as **50**, the smallest multiple of ten above it. Both sides of F3 are
+asserted (40 ≤ 50 and 40 ≥ 25), and so is non-vacuity: the same harness at
+N = 1 must produce violations.
 
 ---
 
@@ -232,7 +293,7 @@ file for each one and fails if the run does not reproduce it.
   (L16)
 - The determinism ban list **watched firing**: every banned construct linted
   through a fixture, inside the perimeter and outside it (L15)
-- **238 tests**
+- **283 tests**
 - **96.4% mutation score** over `src/policy`
   (161 of 167 mechanical mutants killed), plus 3 generated mutants excluded
   because they do not parse — a mutant killed by a syntax error was never a
@@ -242,9 +303,18 @@ file for each one and fails if the run does not reproduce it.
   REACH the regimes they claim to cover — a window boundary, and a slot handed
   to a second claimant (L13)
 - **300 differential histories**, compared on the rejection _reason_ and not
-  only the admit/reject bit
+  only the admit/reject bit — and, because comparing the reason is not the same
+  as agreeing on which reason WINS, **9 hand-built overlap scenarios** in which
+  two or more refusal conditions hold at once, each asserting it reaches its
+  overlap before asserting the order (L23)
+- **200 quiescence seeds** driving I6, which until this round had never fired on
+  a real run: 198 of them reach quiescence still holding capacity, the longest
+  drain is 40 ticks, and the liveness bound N = 50 is **computed from that
+  measurement** and asserted from both sides (SEMANTICS F3)
 - **500 fault-injected control-plane histories** — duplicates, retried timeouts,
   reordering, delays and pod deaths, checked after every event (L20)
+- I4's expected side rebuilt from the **event history**, not from a method on
+  the class being checked (L22, L25)
 - **500 KhataGO protocol runs** under the fault injector
 - Fairness: per-tenant caps **1.000×** degradation; global FIFO starves a
   well-behaved tenant outright in **38 of 60** seeds

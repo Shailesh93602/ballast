@@ -25,3 +25,7 @@ id_ed25519
 credentials.json
 serviceAccount*.json
 service-account*.json
+
+# Written by scripts/mutate.mjs while a campaign is in flight; its presence
+# means src/ may still contain a planted mutant (test/mutation.test.ts fails).
+.mutation-in-progress

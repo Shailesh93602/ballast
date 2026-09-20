@@ -8,35 +8,43 @@ Planted mutants live in `MUTATION.md` and are **not** listed here. Promoting a
 planted bug to a "discovery" would make this document worthless, and an
 interviewer will ask which is which.
 
-**L1–L9 were found by the harness. L10–L19 were found by auditing the harness**
+**L1–L9 were found by the harness. L10–L21 were found by auditing the harness**
 — reading what the oracles were actually fed rather than what their field names
-said they were fed. The distinction is stated because it is the honest one, and
-because the ratio it produces is the most useful thing in this file: twelve of
-twenty-one findings were in the checking apparatus, not in the system under test.
+said they were fed. **L22–L27 came from a second audit** that asked a narrower
+question: which decisions do the two engines share WITHOUT having written them
+down? The distinction is stated because it is the honest one, and because the
+ratio it produces is the most useful thing in this file: sixteen of twenty-seven
+findings were in the checking apparatus, not in the system under test.
 
-| #   | Found by                          | Severity       | What                                                                                                            |
-| --- | --------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------- |
-| L1  | Invariant corpus, 2,000 histories | 🔴 checker     | **I5 fired on correctly-refused stale releases**                                                                |
-| L2  | Differential, seed 1              | 🔴 spec gap    | **Nothing said whether completion releases the slot**                                                           |
-| L3  | Differential, seed 101            | 🟠 reference   | **Rejected-then-cancelled runs were billed for credit**                                                         |
-| L4  | Mechanical mutation               | 🟠 dead code   | **`slot.released` never set true — the double-release branch was unreachable**                                  |
-| L5  | Mechanical mutation               | 🟡 dead code   | **`slot.runId` written five times, read never**                                                                 |
-| L6  | Mechanical mutation               | 🟠 correctness | **Every duplicate completion answered `replayId: 0`**                                                           |
-| L7  | Mutation run on a red suite       | 🔴 harness     | **The mutation harness reported 100% because the suite already failed**                                         |
-| L8  | Writing a test for a mutant       | 🟠 dead code   | **The retry-limit branch was unreachable — contention stopped after attempt 1**                                 |
-| L9  | Hand-applying a "survivor"        | 🟠 harness bug | **The negation operator didn't negate — vacuous mutants read as suite gaps**                                    |
-| L10 | Differential, 200-event histories | 🔴 correctness | **`complete()` and `cancel()` freed a slot with no fencing token — a stale claimant evicted the live owner**    |
-| L11 | Reading the corpus's own wiring   | 🔴 checker     | **I4 compared a map to itself** — the corpus passed `creditsSpentMap()` as BOTH of its inputs                   |
-| L12 | Un-aliasing I4                    | 🟠 reference   | **The "independent recomputation" of credit was not window-scoped**, so it measured a different quantity        |
-| L13 | Measuring the corpus's reach      | 🟠 corpus      | **0 of 2,000 histories ever crossed a window boundary** — max vtime 85 against `windowTicks` 100                |
-| L14 | Auditing the retention guard      | 🟠 correctness | **A fully-evicted log answered "nothing new" instead of `retention-exceeded`**                                  |
-| L15 | `grep -r eslint test/`            | 🔴 harness     | **DETERMINISM.md described a lint fixture that did not exist** — the perimeter had never been watched fire      |
-| L16 | Reading the determinism guard     | 🔴 harness     | **The 1,000-seed guard only ever ran `NaivePolicy`** — the control plane had no determinism guard at all        |
-| L17 | Auditing the claims tests         | 🟠 harness     | **"38 of 60" was asserted as a literal in four places and computed in none**                                    |
-| L18 | Auditing the shrinker's tests     | 🟠 harness     | **The only S3 test asserted nothing on the path it actually takes**                                             |
-| L19 | Parse-checking the mutant corpus  | 🟡 harness     | **3 of 165 mutants do not parse** and were scored as kills                                                      |
-| L20 | Grepping for `Substrate`          | 🔴 harness     | **The fault injector was connected to nothing** — the control plane was never driven by the substrate that lies |
-| L21 | The fault-injected corpus, seed 1 | 🔴 correctness | **A retried admit took a second slot and spent a second credit** for one logical run                            |
+| #   | Found by                                        | Severity       | What                                                                                                                          |
+| --- | ----------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| L1  | Invariant corpus, 2,000 histories               | 🔴 checker     | **I5 fired on correctly-refused stale releases**                                                                              |
+| L2  | Differential, seed 1                            | 🔴 spec gap    | **Nothing said whether completion releases the slot**                                                                         |
+| L3  | Differential, seed 101                          | 🟠 reference   | **Rejected-then-cancelled runs were billed for credit**                                                                       |
+| L4  | Mechanical mutation                             | 🟠 dead code   | **`slot.released` never set true — the double-release branch was unreachable**                                                |
+| L5  | Mechanical mutation                             | 🟡 dead code   | **`slot.runId` written five times, read never**                                                                               |
+| L6  | Mechanical mutation                             | 🟠 correctness | **Every duplicate completion answered `replayId: 0`**                                                                         |
+| L7  | Mutation run on a red suite                     | 🔴 harness     | **The mutation harness reported 100% because the suite already failed**                                                       |
+| L8  | Writing a test for a mutant                     | 🟠 dead code   | **The retry-limit branch was unreachable — contention stopped after attempt 1**                                               |
+| L9  | Hand-applying a "survivor"                      | 🟠 harness bug | **The negation operator didn't negate — vacuous mutants read as suite gaps**                                                  |
+| L10 | Differential, 200-event histories               | 🔴 correctness | **`complete()` and `cancel()` freed a slot with no fencing token — a stale claimant evicted the live owner**                  |
+| L11 | Reading the corpus's own wiring                 | 🔴 checker     | **I4 compared a map to itself** — the corpus passed `creditsSpentMap()` as BOTH of its inputs                                 |
+| L12 | Un-aliasing I4                                  | 🟠 reference   | **The "independent recomputation" of credit was not window-scoped**, so it measured a different quantity                      |
+| L13 | Measuring the corpus's reach                    | 🟠 corpus      | **0 of 2,000 histories ever crossed a window boundary** — max vtime 85 against `windowTicks` 100                              |
+| L14 | Auditing the retention guard                    | 🟠 correctness | **A fully-evicted log answered "nothing new" instead of `retention-exceeded`**                                                |
+| L15 | `grep -r eslint test/`                          | 🔴 harness     | **DETERMINISM.md described a lint fixture that did not exist** — the perimeter had never been watched fire                    |
+| L16 | Reading the determinism guard                   | 🔴 harness     | **The 1,000-seed guard only ever ran `NaivePolicy`** — the control plane had no determinism guard at all                      |
+| L17 | Auditing the claims tests                       | 🟠 harness     | **"38 of 60" was asserted as a literal in four places and computed in none**                                                  |
+| L18 | Auditing the shrinker's tests                   | 🟠 harness     | **The only S3 test asserted nothing on the path it actually takes**                                                           |
+| L19 | Parse-checking the mutant corpus                | 🟡 harness     | **3 of 165 mutants do not parse** and were scored as kills                                                                    |
+| L20 | Grepping for `Substrate`                        | 🔴 harness     | **The fault injector was connected to nothing** — the control plane was never driven by the substrate that lies               |
+| L21 | The fault-injected corpus, seed 1               | 🔴 correctness | **A retried admit took a second slot and spent a second credit** for one logical run                                          |
+| L22 | Reading A9 against what `admit` checks          | 🔴 correctness | **The path that GRANTS a slot never checked the fencing token** — a retry was answered with another tenant's slot             |
+| L23 | Writing down the precedence B7 never fixed      | 🟠 reference   | **The two engines already disagreed about which refusal to report**, and no corpus could construct the request                |
+| L24 | Grepping the checker's inputs for readers       | 🟡 checker     | **`slotOwnerToken` was a declared oracle input that nothing wrote and no invariant read**                                     |
+| L25 | Building the history-derived credit oracle      | 🟡 correctness | **The credit ledger described the epoch of the last ADMISSION**, not the epoch containing `now`                               |
+| L26 | Asking what could kill a mutant in `src/core`   | 🟠 harness     | **The determinism guard cannot tell a correct RNG from a changed one**, and the README's three hashes were checked by nothing |
+| L27 | The suite going red under the harness's own run | 🔴 harness     | **A mutant "killed" by a TIMEOUT was scored as a kill** — a flaky wall clock inflating the mutation score                     |
 
 ---
 
@@ -679,3 +687,259 @@ I8 violation reachable through that door and no other. A9 now refuses it with
 live claim echoes the existing grant — acked, not errored, for E7's reason. A
 completed id is refused. The reference oracle counts credit per claimed RUN
 rather than per admit EVENT, which is the same correction on the other side.
+
+---
+
+## L22 · The fourth door
+
+**Found by:** reading SEMANTICS A9's wording — "a second admit for a run that is
+still live echoes the grant the caller already holds" — against the code that
+implements it.
+
+**Symptom:** none. Nothing failed. That is the finding.
+
+**Cause.** A9's "still live" was implemented as `run.slotId !== null`, followed
+by a lookup of that slot:
+
+```ts
+if (existing !== undefined && existing.slotId !== null) {
+  const slot = this.slots.find((s) => s.id === existing.slotId);
+  if (slot !== undefined) {           // <- always true
+    return { ok: true, slotId: slot.id, token: existing.token, ... };
+  }
+}
+```
+
+Nothing clears `run.slotId` — not `release()`, not lease expiry — and slots are
+never removed from the array, so `slot !== undefined` is true for every slot the
+plane has ever had. The branch therefore fired for claims that were long gone,
+and answered `ok: true` with a grant for a slot the caller did not hold. Two
+doors, both reachable:
+
+- **After `release()`:** the plane answered `slotId: slot-0, token: 1` while
+  `totalClaimed` was 0. A grant for a slot sitting free in the pool.
+- **After a reclaim:** acme's lease expires, globex claims the same slot, acme's
+  at-least-once retry arrives — and acme is handed **`slot-0`, globex's
+  `leaseUntil`, and acme's dead token**, with acme's in-flight count at 0.
+
+**Why every oracle stayed quiet.** The 2,000-history invariant corpus, the
+300-history differential and the 500-history fault-injected corpus were all
+green against this code, and each for its own reason:
+
+- I1, I2 and I3 measure slots the plane believes are taken. This bug hands out a
+  grant and takes nothing, so every count moves **further inside** its bound.
+- The differential renders both engines' answers as `admitted:r1`. The
+  implementation echoed, the reference made a fresh claim; the rendered strings
+  are identical.
+- I4 compared the plane's counter against `creditsExpected()`, which walked
+  `this.runs` — the same map. The unbilled claim was missing from **both sides at
+  once**, so the ledger was self-consistent and wrong.
+- No corpus generates a second admit for a released runId at all.
+
+**Why it is C6 again.** L10 found `complete()` and `cancel()` freeing a slot by
+id with no token check, and C6 was written to say every path that FREES a slot
+compares tokens. It enumerated three doors because those were the three that
+free. The path that **grants** was never asked, and the audit that wrote C6 did
+not catch it because it was searching for slot-freeing code. The general form,
+which is the part worth keeping: **any code that resolves a stored `slotId` back
+to a slot is making an ownership claim, whatever it then does with it.**
+
+**Fix:** the echo branch asks the same question `freeSlotOf` asks — the slot must
+still be owned and its token must still match. A claim that is gone is not a
+duplicate of anything, so it falls through to a fresh claim: new slot, new
+token, new credit (SEMANTICS A10, C7).
+
+**Regression:** `test/faultInjection.test.ts` → _"a re-admit after RELEASE takes a
+fresh slot instead of echoing a dead grant"_ and _"a re-admit after the slot was
+RECLAIMED never names the new owner's slot"_. Both fail against the pre-fix
+source; the three corpora do not.
+
+---
+
+## L23 · The order both engines agreed on without either writing it down
+
+**Found by:** trying to write the SEMANTICS row for rejection precedence and
+discovering there was nothing to write it from.
+
+**Symptom:** an admit naming an unknown tenant, for a runId that had already been
+cancelled, is answered `unknown-tenant` by the implementation and
+`cancelled-before-start` by the reference. They had disagreed for as long as both
+had existed.
+
+**Cause.** B3 and B4 each name the reason that applies when ONE condition holds.
+Neither says what happens when two hold at once. Both engines evaluated
+cap → credit → pool, and both evaluated the lifecycle conditions somewhere
+around the tenant lookup, in orders that happened not to match — the
+implementation checks the tenant first, the reference checked the lifecycle
+first.
+
+**Why the differential could not see it.** This is the part worth reading. The
+differential compares the rejection **reason**, not merely the admitted/rejected
+bit — that was deliberate, and it is why B5 makes the reasons distinct. So the
+question _looked_ covered. It was not: every generated history draws its tenants
+from the configured list, so the one request that distinguishes the two orders
+has never appeared in any corpus, and both halves were deriving the order from
+the same unwritten decision anyway.
+
+**This is the shared-spec blind spot in its purest remaining form.** A
+differential cannot close it, because the differential is the thing being
+fooled. What closes it is giving the two engines sources that cannot silently
+agree: the order is declared in SEMANTICS B7, `REJECTION_PRECEDENCE` is asserted
+against that declaration by parsing the file, the reference resolves through the
+constant instead of short-circuiting, and the implementation keeps its own
+source order. Editing any one of the three makes another disagree.
+
+**Fix:** B7 written, with the rule that generates the order rather than just the
+list — permanent refusals before transient ones, and within the transient ones,
+the condition closest to the caller first. The reference now evaluates every
+condition and resolves the set; the implementation was already correct.
+
+**Regression:** `test/precedence.test.ts`. Nine hand-built scenarios, each
+asserting that it REACHES its overlap before asserting the order, plus a check
+that every adjacent pair in the declared chain is exercised and a note naming
+the one pair that is structurally unreachable. Four of its tests fail if the
+declared order is moved.
+
+---
+
+## L24 · An oracle input that nothing wrote and nothing read
+
+**Found by:** `grep -rn slotOwnerToken src/ test/` — the reusable check this
+workspace already had written down: for every export, find the callers.
+
+**Symptom:** `CheckableState.slotOwnerToken` is documented as "slotId -> the
+fencing token of its current owner". Six files mention it. Five pass
+`new Map()`. The sixth populates it in a fixture. **No invariant reads it.**
+
+**Why it matters more than a tidy-up.** It is L5's dead state one layer up, in
+the apparatus rather than in the system — and the apparatus is where this
+project's findings live. A declared input that nothing writes reads, to anyone
+scanning the checker, as evidence the checker inspects the slot table. It does
+not. And the field was the obvious place to put the one check that would have
+made L22 visible from raw state.
+
+**The structural point underneath it.** `acceptedReleases` is a list the control
+plane curates: the checker judges facts rather than self-assessments (that was
+L1's fix), but **the plane still decides which facts the checker is shown**.
+That is only half of L1. `slotOwnerToken` is the other half — a snapshot of the
+slot table that the plane does not filter.
+
+**Fix:** the plane exposes `slotTokens()` (a straight map of the slot array), the
+harness passes it, and I5 now judges it: no two owned slots may carry the same
+fencing token, and an owned slot may not carry the never-claimed sentinel 0.
+Both follow from C1, and both are checkable without asking the plane anything
+about its own behaviour.
+
+**Regression:** `test/invariants.test.ts` → three new I5 cases, including the
+silent one.
+
+---
+
+## L25 · The ledger described the epoch of the last admission
+
+**Found by:** building the history-derived credit oracle and watching I4 fire on
+seed 101, at a `release` event at tick 101.
+
+**Symptom:** `spent=12` against an expected `0`, at the first tick of a new
+window, on a release.
+
+**Cause.** `rollWindowIfNeeded` was called only from `admit`. So between a window
+boundary and the next admission, `creditsSpent` still described an epoch that had
+**ended**. No admission decision could observe it — `admit` rolls before it reads
+— which is exactly why it survived every test the project had.
+
+**Why it only appeared now.** It takes a reader that derives the window from
+something other than the plane's own traffic. The new oracle derives it from the
+event's `vtime`, so the two disagreed, and the disagreement was real: the answer
+to "how much has this tenant spent this window" depended on when that tenant last
+asked.
+
+**Honest severity.** Nothing downstream consumed the ledger, so no decision was
+ever wrong. It is recorded because the fix removed a whole category of
+disagreement rather than papering over one, and because the way it surfaced is
+the point: **an oracle that shares no state with the implementation finds things
+a recomputation over that state cannot, and this is the smallest possible example
+of it.**
+
+**Fix:** the counter is stored with the window it belongs to and every read is a
+projection at `now` (SEMANTICS A11). There is no roll step any more — nothing can
+be stale if nothing needs rolling.
+
+**Regression:** `test/controlPlane.test.ts` → _"A11: the ledger reads zero in a new
+window even if nothing has arrived"_.
+
+---
+
+## L26 · A determinism guard that cannot tell right from reproducible
+
+**Found by:** asking what, in the whole suite, could possibly kill a mutation in
+`src/core/rng.ts` — before extending the mutation harness to cover it.
+
+**Symptom:** nothing. The 1,000-seed determinism guard is green, and would stay
+green against a materially different pseudo-random generator.
+
+**Cause.** The guard asserts three things: the same seed hashes the same twice
+in-process, the same seed hashes the same in a fresh process against the built
+artifact, and 200 different seeds produce 190+ distinct hashes. **All three hold
+for a wrong generator.** A mutated PRNG is still perfectly deterministic and
+still perfectly distinct. Nothing anywhere pinned an actual value.
+
+**And the README was quoting values nobody checked.** The "See it work" section
+prints three 64-character digests and says "the hashes are the ones you will
+get". They were written once, by hand. That is the third time this repository has
+found a number stated in a document and produced by nothing — after the test
+count and the "38 of 60" starvation figure — and it was sitting in the one
+section a reader is most likely to run.
+
+**Fix:** `readmeClaims.test.ts` parses the hashes out of the README and asserts
+each against a real run, plus the vacuity guard (the parse must find some) and a
+distinctness check (so the block could not be satisfied by a spine that ignores
+the seed). The determinism suite keeps its reproducibility claims; it now has a
+golden value behind them.
+
+---
+
+## L27 · A mutant killed by a stopwatch
+
+**Found by:** the mutation harness refusing to start — its own L7 guard —
+immediately after the suite grew.
+
+**Symptom:** `REFUSING TO RUN: the test suite fails before any mutation is
+applied`, against a suite that passes when run by hand.
+
+**Cause, in two halves.** Four test files shell out to other processes: eslint
+for the determinism perimeter, git and node for the secret-file check, Postgres
+for the Tier B flash sale. Each takes about three seconds alone and drifts past
+vitest's 5-second default under load. That is a flake, and on its own it is
+merely annoying.
+
+**What makes it a finding is the second half:** `scripts/mutate.mjs` judges a
+mutant KILLED when the suite exits non-zero, and a timeout exits non-zero. Across
+362 mutants, every flaky timeout would have been recorded as a kill — inflating
+the score, in the direction that reads as success, with no trace in the output.
+
+**It is the same error twice removed.** L7 was a mutant "killed" by a suite that
+was already red. L19 was a mutant "killed" by a syntax error. This is a mutant
+"killed" by the machine being busy. All three are the harness reporting a number
+about something other than the test suite, and all three flatter it.
+
+**Fix, in two places because either alone is thin.** `vitest.config.ts` gives the
+process-spawning tests a realistic budget so the timeouts stop happening — no
+assertion is loosened, because SEMANTICS F4 forbids asserting a wall-clock number
+anywhere. And the harness now distinguishes the three outcomes: a timed-out run
+is retried once, and if it times out again the mutant is scored **INCONCLUSIVE**
+and removed from the denominator, exactly as a non-parsing mutant is.
+
+**The related cost, fixed at the same time.** The harness ran the entire suite
+per mutant, including those four files — about 35 seconds each time — none of
+which import anything from the mutated directories, directly or transitively, so
+none of which can observe a mutation. The graded set is now computed by walking
+each test file's imports rather than listed by hand, because a hand-maintained
+exclusion is exactly the thing that rots: a test file that later starts importing
+the control plane would keep being skipped and the score would quietly stop
+measuring it.
+
+**Regression:** `test/mutation.test.ts` — the walk is asserted sound in both
+directions (nothing skipped can reach the mutated code, nothing graded is
+useless), non-vacuous, and transitive; every `src/` directory must be either
+mutated or explicitly excused with a reason in MUTATION.md.

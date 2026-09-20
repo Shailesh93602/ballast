@@ -28,6 +28,62 @@ export type RejectReason =
   | "run-already-terminal"
   | "unknown-tenant";
 
+/**
+ * The order in which SIMULTANEOUSLY-TRUE refusal conditions are reported —
+ * SEMANTICS B7.
+ *
+ * B3 and B4 each name the reason that applies when ONE condition holds. Neither
+ * says what happens when two hold at once, and both engines happened to evaluate
+ * cap → credit → pool because both were written by one author in one sitting.
+ * That is the shared-spec blind spot in its purest form: the differential
+ * compares the reason, which makes it LOOK covered, while both halves derive the
+ * order from the same unwritten decision.
+ *
+ * So the order is written down ONCE, here, and:
+ *
+ *   - `test/precedence.test.ts` asserts this array against the order declared in
+ *     docs/SEMANTICS.md B7, so the constant cannot drift from the spec;
+ *   - the reference oracle RESOLVES through this array instead of
+ *     short-circuiting, so it no longer encodes an order of its own;
+ *   - the implementation keeps its own short-circuit order in source, so a
+ *     divergence between the two is a test failure rather than a silent
+ *     agreement.
+ *
+ * The engines still share this table — but they can no longer agree on it
+ * SILENTLY, which is the property that was missing.
+ */
+export const REJECTION_PRECEDENCE = [
+  "unknown-tenant",
+  "cancelled-before-start",
+  "run-already-terminal",
+  "cap-exceeded",
+  "no-credit",
+  "pool-full",
+] as const satisfies readonly RejectReason[];
+
+/**
+ * A slot-freeing the control plane ACCEPTED, recorded as a raw fact.
+ *
+ * THIS TYPE LIVES WITH THE PRODUCER, NOT THE CHECKER. `controlPlane.ts` used to
+ * import it from `oracle/invariants.ts`, so the policy layer depended on the
+ * thing grading it and the shape of the evidence was defined by the grader. The
+ * dependency now points the way the data flows: the plane emits facts, the
+ * oracle consumes them.
+ *
+ * That is a direction fix, not a structural one — see the note on
+ * `CheckableState.slotOwnerToken`, which is the part that actually reduces the
+ * plane's control over what the checker sees.
+ */
+export interface AcceptedRelease {
+  readonly slotId: string;
+  /** The token the releasing party presented. */
+  readonly tokenUsed: number;
+  /** The token the slot actually held when the release was accepted. */
+  readonly tokenCurrent: number;
+  /** How many times this slot had already been released in this generation. */
+  readonly priorReleasesOfGeneration: number;
+}
+
 export type AdmitOutcome =
   | {
       readonly ok: true;

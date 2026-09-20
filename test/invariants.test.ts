@@ -177,6 +177,42 @@ describe("invariant checker — every invariant must be able to FAIL", () => {
     expect(checkAll(s).map((x) => x.invariant)).not.toContain("I5");
   });
 
+  it("I5 catches two live slots holding the SAME fencing token", () => {
+    // Judged from the raw slot table, not from anything the plane says about
+    // itself. C1 makes the counter globally monotonic; what does the work is
+    // that two live claims can never present the same token — if they could, a
+    // fencing comparison cannot tell them apart and every check built on it
+    // answers "yes" for the wrong claimant.
+    const s = {
+      ...healthy(),
+      slotOwnerToken: new Map([
+        ["slot-1", 4],
+        ["slot-2", 4],
+      ]),
+    };
+    expect(checkAll(s).map((x) => x.invariant)).toContain("I5");
+  });
+
+  it("I5 catches an owned slot carrying the never-claimed token 0", () => {
+    // `nextToken` starts at 1, so 0 on an OWNED slot means a claim was made
+    // without taking a token — and 0 is the token a cancel-before-admit
+    // placeholder carries, so it would compare equal to one.
+    const s = { ...healthy(), slotOwnerToken: new Map([["slot-1", 0]]) };
+    expect(checkAll(s).map((x) => x.invariant)).toContain("I5");
+  });
+
+  it("I5 stays silent on a healthy slot table — distinct, non-zero tokens", () => {
+    const s = {
+      ...healthy(),
+      slotOwnerToken: new Map([
+        ["slot-1", 9],
+        ["slot-2", 10],
+        ["slot-3", 11],
+      ]),
+    };
+    expect(checkAll(s).map((x) => x.invariant)).not.toContain("I5");
+  });
+
   it("I6 catches capacity orphaned past the liveness bound", () => {
     const s = {
       ...healthy(),
